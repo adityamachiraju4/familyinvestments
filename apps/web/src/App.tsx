@@ -1,7 +1,7 @@
 import { dashboardAuth, clearSession, type DashboardSession } from "./api/auth";
 import { Login } from "./components/Login";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { NavLink, Route, Routes } from "react-router-dom";
+import { NavLink, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { api, reconnect, refreshPortfolio } from "./api/client";
 import { useQuery } from "./hooks/useQuery";
 import { dateLabel } from "./utils/format";
@@ -10,7 +10,7 @@ import Portfolio from "./pages/Portfolio";
 import HoldingDetail from "./pages/HoldingDetail";
 import Investments from "./pages/Investments";
 import History from "./pages/History";
-function DashboardShell({ onLogout }: { onLogout: () => Promise<void> }) {
+function DashboardShell({ onLogout, callbackResult }: { onLogout: () => Promise<void>; callbackResult: string | null }) {
   const [logoutBusy, setLogoutBusy] = useState(false);
   const [revision, setRevision] = useState(0),
     [busy, setBusy] = useState(false),
@@ -62,9 +62,9 @@ function DashboardShell({ onLogout }: { onLogout: () => Promise<void> }) {
       !automaticAttempted.current
     ) {
       automaticAttempted.current = true;
-      if (status.data.refresh_required) void refresh(true);
+      if (callbackResult === "connected" || status.data.refresh_required) void refresh(true);
     }
-  }, [status.loading, status.data, connected, refresh]);
+  }, [status.loading, status.data, connected, refresh, callbackResult]);
   async function connect() {
     try {
       await reconnect();
@@ -131,6 +131,9 @@ function DashboardShell({ onLogout }: { onLogout: () => Promise<void> }) {
           </div>
         </header>
         <main>
+          {callbackResult && <p className="notice" role="status">{callbackResult === "connected"
+            ? "Zerodha connected successfully."
+            : "Zerodha connection could not be completed. Please try again."}</p>}
           {message && (
             <p className="notice" role="status">
               {message}
@@ -203,6 +206,18 @@ function LinkBrand() {
 
 
 export default function App() {
+  const location = useLocation();
+  const navigate = useNavigate();
+  const [callbackResult] = useState(() => {
+    const marker = new URLSearchParams(location.search).get("zerodha");
+    return marker === "connected" || marker === "connect_failed" ? marker : null;
+  });
+  useEffect(() => {
+    const params = new URLSearchParams(location.search);
+    if (!params.has("zerodha")) return;
+    params.delete("zerodha");
+    navigate({ pathname: location.pathname, search: params.toString() ? `?${params}` : "", hash: location.hash }, { replace: true });
+  }, [location.pathname, location.search, location.hash, navigate]);
   const [session, setSession] = useState<DashboardSession | null>(null);
   const [checking, setChecking] = useState(true);
   const [error, setError] = useState("");
@@ -222,5 +237,5 @@ export default function App() {
   }, [session]);
   if (checking) return <div className="login-shell"><p role="status">Checking dashboard access…</p></div>;
   if (!session?.authenticated) return <Login initialError={error} onLogin={setSession} />;
-  return <DashboardShell onLogout={async () => { await dashboardAuth.logout(); clearSession(); setSession(null); }} />;
+  return <DashboardShell callbackResult={callbackResult} onLogout={async () => { await dashboardAuth.logout(); clearSession(); setSession(null); }} />;
 }

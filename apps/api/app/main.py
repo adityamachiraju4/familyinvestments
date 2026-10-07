@@ -15,7 +15,7 @@ from app import database
 from app.config import settings
 from app.portfolio.routes import router as portfolio_router
 from app.integrations.zerodha.exceptions import IntegrationError
-from app.integrations.zerodha.routes import router as zerodha_router
+from app.integrations.zerodha.routes import router as zerodha_router, callback_router
 
 @asynccontextmanager
 async def lifespan(application):
@@ -88,5 +88,6 @@ async def integration_error_handler(request, exc: IntegrationError) -> JSONRespo
 
 app.include_router(auth_router)
 app.include_router(zerodha_router, dependencies=[Depends(require_access)])
+app.include_router(callback_router)
 
 app.include_router(portfolio_router, dependencies=[Depends(require_access)])

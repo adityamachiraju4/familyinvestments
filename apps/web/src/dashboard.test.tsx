@@ -337,3 +337,27 @@ it("shows unknown executed investments without assigning them to Other", async (
   expect(screen.getByText("3 units at ₹180.12")).toBeInTheDocument();
   expect(screen.getByText("₹540.36")).toBeInTheDocument();
 });
+
+it("handles successful callback, removes marker, refreshes status and portfolio once", async () => {
+  const fetch = mockApi(true, false);
+  const { BrowserRouter } = await import("react-router-dom");
+  window.history.replaceState({}, "", "/?zerodha=connected&keep=yes#test");
+  render(<BrowserRouter><App /></BrowserRouter>);
+  expect(await screen.findByText("Zerodha connected successfully.")).toBeInTheDocument();
+  await screen.findByText("Portfolio refreshed successfully.");
+  expect(window.location.search).toBe("?keep=yes");
+  expect(window.location.hash).toBe("#test");
+  expect(fetch.mock.calls.filter(([url]) => String(url).includes("/portfolio/refresh"))).toHaveLength(1);
+  await waitFor(() => expect(fetch.mock.calls.filter(([url]) => String(url).endsWith("/status")).length).toBeGreaterThanOrEqual(2));
+  window.history.replaceState({}, "", "/");
+});
+it("handles failure callback with safe reconnect message and removes marker", async () => {
+  const fetch = mockApi(false);
+  const { BrowserRouter } = await import("react-router-dom");
+  window.history.replaceState({}, "", "/?zerodha=connect_failed");
+  render(<BrowserRouter><App /></BrowserRouter>);
+  expect(await screen.findByText("Zerodha connection could not be completed. Please try again.")).toBeInTheDocument();
+  expect(window.location.search).toBe("");
+  expect(await screen.findByRole("button", { name: "Connect Zerodha for today" })).toBeInTheDocument();
+  expect(fetch.mock.calls.filter(([url]) => String(url).includes("/portfolio/refresh"))).toHaveLength(0);
+});

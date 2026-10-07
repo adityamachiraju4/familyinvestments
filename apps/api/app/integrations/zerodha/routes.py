@@ -1,12 +1,9 @@
-"""Local read-only dashboard endpoints and browser-bound login callback."""
+"""Read-only endpoints and one-time correlation-authorized login callback."""
 
 from collections.abc import Generator
-import hmac
-import json
 from datetime import datetime, timezone
 import logging
 import re
-import secrets
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response
@@ -19,14 +16,15 @@ from app.auth.service import require_access
 from app import database
 from app.config import settings
 from app.integrations.zerodha.client import login_url, require_config
-from app.integrations.zerodha.crypto import decrypt_token, encrypt_token
+from app.integrations.zerodha import login_state
 from app.integrations.zerodha.exceptions import IntegrationError
 from app.integrations.zerodha.schemas import ConnectionStatus, Funds, HoldingView
 from app.integrations.zerodha import service
 from app.models import Holding
 
 router = APIRouter()
-COOKIE = "zerodha_login_state"
+callback_router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 class CallbackLogFilter(logging.Filter):
@@ -68,48 +66,59 @@ def dashboard_url() -> str:
 
 
 @router.get("/integrations/zerodha/login")
-def login(response: Response, return_to_dashboard: bool = False, session=Depends(require_access)) -> dict[str, str]:
+def login(response: Response, return_to_dashboard: bool = False, session=Depends(require_access), db: Session = Depends(integration_db)) -> dict[str, str]:
     require_config()
-    if return_to_dashboard:
-        dashboard_url()  # Validate the configured destination before starting login.
-    state = encrypt_token(json.dumps({"nonce": secrets.token_urlsafe(32), "dashboard": return_to_dashboard, "session": session.token_hash}))
-    response.set_cookie(
-        COOKIE, state, max_age=600, httponly=True, samesite="lax",
-        secure=urlsplit(settings.ZERODHA_REDIRECT_URL).scheme == "https",
-        path="/integrations/zerodha/callback",
-    )
+    dashboard_url()  # Validate server-only destination before creating a correlation.
+    try:
+        state = login_state.create(db, session)
+    except login_state.StateRejected:
+        db.rollback()
+        raise IntegrationError("dashboard_auth_required", "Dashboard login required", 401) from None
     response.headers["Cache-Control"] = "no-store"
     return {"login_url": login_url(state)}
 
 
-@router.get("/integrations/zerodha/callback")
-def callback(request: Request, response: Response, db: Session = Depends(integration_db), session=Depends(require_access)):
-    require_config()
-    params = request.query_params
-    request_token = params.get("request_token", "")
-    state = params.get("state", "")
-    cookie = request.cookies.get(COOKIE, "")
-    if not request_token or len(request_token) > 512 or not re.fullmatch(r"[A-Za-z0-9]+", request_token):
-        raise IntegrationError("callback_invalid", "Invalid Zerodha callback", 400)
-    if not state or not cookie or len(state) > 2048 or len(cookie) > 2048 or not hmac.compare_digest(state.encode(), cookie.encode()):
-        raise IntegrationError("callback_invalid", "Start Zerodha login in this browser before authenticating", 400)
-    try:
-        state_data = json.loads(decrypt_token(state, ttl=600))
-    except (IntegrationError, ValueError):
-        raise IntegrationError("callback_invalid", "Zerodha login has expired; start again", 400) from None
-    if not isinstance(state_data, dict) or not hmac.compare_digest(str(state_data.get("session", "")), session.token_hash):
-        raise IntegrationError("callback_invalid", "Zerodha login belongs to a different dashboard session", 400)
-    configured = urlsplit(settings.ZERODHA_REDIRECT_URL)
-    actual = urlsplit(str(request.url))
-    if (actual.scheme, actual.netloc, actual.path) != (configured.scheme, configured.netloc, configured.path):
-        raise IntegrationError("callback_invalid", "Callback URL does not match the configured redirect URL", 400)
-    service.connect(db, request_token)
-    if isinstance(state_data, dict) and state_data.get("dashboard") is True:
-        response = RedirectResponse(dashboard_url(), status_code=303)
-    response.delete_cookie(COOKIE, path="/integrations/zerodha/callback")
+def callback_redirect(result: str):
+    response = RedirectResponse(dashboard_url() + "?zerodha=" + result, status_code=303)
     response.headers["Cache-Control"] = "no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
-    return response if isinstance(response, RedirectResponse) else {"status": "connected"}
+    return response
+
+
+@callback_router.get("/integrations/zerodha/callback")
+def callback(request: Request, db: Session = Depends(integration_db)):
+    # Authorization is the one-time DB correlation, not a possibly partitioned cookie.
+    try:
+        require_config()
+        dashboard_url()
+        params = request.query_params
+        token = params.get("request_token", "")
+        state = params.get("state", "")
+        if (not re.fullmatch(r"[A-Za-z0-9]{1,512}", token)
+                or not re.fullmatch(r"[a-f0-9]{64}", state)
+                or any(len(params.getlist(key)) != 1 for key in ("request_token", "state"))
+                or any(len(params.getlist(key)) > 1 for key in ("status", "action"))
+                or params.get("status", "success") != "success"
+                or params.get("action", "login") != "login"):
+            raise login_state.StateRejected("parameters_invalid")
+        configured = urlsplit(settings.ZERODHA_REDIRECT_URL)
+        actual = urlsplit(str(request.url))
+        if (actual.scheme, actual.netloc, actual.path) != (configured.scheme, configured.netloc, configured.path):
+            raise login_state.StateRejected("callback_url_invalid")
+        login_state.claim(db, state)
+        service.lock_account(db)  # Serialize account binding across different login flows.
+        service.connect(db, token)  # Existing exchange, account binding, encryption and commit.
+        return callback_redirect("connected")
+    except login_state.StateRejected as exc:
+        db.rollback()
+        logger.warning("zerodha_callback_failed reason=%s", str(exc))
+    except IntegrationError:
+        db.rollback()
+        logger.warning("zerodha_callback_failed reason=exchange_or_configuration_failed")
+    except Exception:
+        db.rollback()
+        logger.warning("zerodha_callback_failed reason=internal_failure")
+    return callback_redirect("connect_failed")
 
 
 @router.get("/integrations/zerodha/status", response_model=ConnectionStatus)

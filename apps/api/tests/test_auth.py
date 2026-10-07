@@ -4,7 +4,7 @@ from unittest.mock import MagicMock
 import asyncio
 import pytest
 from pydantic import SecretStr
-from sqlalchemy import create_engine, select, func
+from sqlalchemy import create_engine, select, func, event
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 from fastapi.testclient import TestClient
@@ -29,10 +29,17 @@ def auth(monkeypatch, hashed):
     for key,value in dict(APP_ENV='development', FRONTEND_ORIGIN=None, DASHBOARD_USERNAME='household', DASHBOARD_PASSWORD_HASH=SecretStr(hashed), SESSION_SECRET=SecretStr('test-session-secret-at-least-32-bytes'), SESSION_TTL_SECONDS=3600).items():
         monkeypatch.setattr(settings,key,value)
     engine=create_engine('sqlite://',connect_args={'check_same_thread':False},poolclass=StaticPool)
-    DashboardSession.__table__.create(engine); LoginAttempt.__table__.create(engine)
+    from app.models import ZerodhaAccount, ZerodhaLoginState
+    @event.listens_for(engine, 'connect')
+    def configure(connection, record):
+        connection.create_function('now', 0, lambda: service.now().isoformat(' '))
+        connection.execute('PRAGMA foreign_keys=ON')
+    for model in (DashboardSession, LoginAttempt, ZerodhaAccount, ZerodhaLoginState):
+        model.__table__.create(engine)
     from app import database
     monkeypatch.setattr(database, 'SessionLocal', lambda: Session(engine, expire_on_commit=False))
     with Session(engine,expire_on_commit=False) as db:
+        db.add(ZerodhaAccount(client_id='LOCAL_DEV', display_name='Test account')); db.commit()
         app.dependency_overrides[service.auth_db]=lambda: db
         app.dependency_overrides[integration_db]=lambda: db
         with TestClient(app) as client:
@@ -54,7 +61,7 @@ def test_health_public(auth,monkeypatch):
     assert client.get('/auth/session').json()['authenticated'] is False
 
 
-@pytest.mark.parametrize('path,method',[('/portfolio/holdings','GET'),('/portfolio/summary','GET'),('/portfolio/activity/today','GET'),('/portfolio/refresh','POST'),('/integrations/zerodha/status','GET'),('/integrations/zerodha/login','GET'),('/integrations/zerodha/callback','GET'),('/integrations/zerodha/sync/holdings','POST')])
+@pytest.mark.parametrize('path,method',[('/portfolio/holdings','GET'),('/portfolio/summary','GET'),('/portfolio/activity/today','GET'),('/portfolio/refresh','POST'),('/integrations/zerodha/status','GET'),('/integrations/zerodha/login','GET'),('/integrations/zerodha/sync/holdings','POST')])
 def test_private_routes_reject_unauthenticated(auth,path,method):
     response=auth[0].request(method,path)
     assert response.status_code==401
@@ -161,12 +168,13 @@ def test_zerodha_callback_bound_to_dashboard_session(auth,monkeypatch):
     state=parse_qs(parse_qs(urlsplit(response.json()['login_url']).query)['redirect_params'][0])['state'][0]
     connected=MagicMock();monkeypatch.setattr(zerodha,'connect',connected)
     callback='/integrations/zerodha/callback?request_token=testrequest&state='+state
-    assert client.get(callback).status_code==200
+    client.cookies.clear()  # Top-level callback may not receive partitioned household cookies.
+    assert client.get(callback,follow_redirects=False).headers['location'].endswith('?zerodha=connected')
     connected.assert_called_once()
     # Reusing a valid old brokerage state with a new dashboard session is rejected.
     csrf=login(client).json()['csrf_token']
     client.cookies.set('zerodha_login_state',state)
-    assert client.get(callback).status_code==400
+    assert client.get(callback,follow_redirects=False).headers['location'].endswith('?zerodha=connect_failed')
 
 
 def test_login_logs_and_database_do_not_store_password_or_cookie(auth,caplog):
@@ -184,7 +192,7 @@ def test_login_logs_and_database_do_not_store_password_or_cookie(auth,caplog):
 def test_all_private_routes_carry_access_dependency():
     from fastapi.routing import APIRoute
     for route in app.routes:
-        if isinstance(route,APIRoute) and route.path.startswith(('/portfolio/','/integrations/zerodha/')):
+        if isinstance(route,APIRoute) and route.path != '/integrations/zerodha/callback' and route.path.startswith(('/portfolio/','/integrations/zerodha/')):
             assert any(dependency.call is service.require_access for dependency in route.dependant.dependencies)
 
 
@@ -198,3 +206,22 @@ def test_household_limit_blocks_rotating_addresses(auth,monkeypatch):
     with TestClient(app,client=('192.0.2.200',1234)) as client:
         assert login(client,password='wrong').status_code==429
     assert db.scalar(select(func.count()).select_from(LoginAttempt))==count_before
+
+
+def test_logout_revokes_unused_brokerage_state(auth,monkeypatch):
+    from urllib.parse import parse_qs,urlsplit
+    from app.models import ZerodhaLoginState
+    import httpx
+    client,db=auth
+    client.base_url=httpx.URL('http://127.0.0.1')
+    for key,value in dict(ZERODHA_API_KEY='testapikey',ZERODHA_API_SECRET=SecretStr('testsecret'),ZERODHA_REDIRECT_URL='http://127.0.0.1/integrations/zerodha/callback',TOKEN_ENCRYPTION_KEY=SecretStr(Fernet.generate_key().decode())).items():monkeypatch.setattr(settings,key,value)
+    csrf=login(client).json()['csrf_token']
+    result=client.get('/integrations/zerodha/login',headers={'Origin':ORIGIN,'X-CSRF-Token':csrf})
+    raw=parse_qs(parse_qs(urlsplit(result.json()['login_url']).query)['redirect_params'][0])['state'][0]
+    assert db.scalar(select(ZerodhaLoginState)) is not None
+    assert client.post('/auth/logout',headers={'Origin':ORIGIN,'X-CSRF-Token':csrf}).status_code==200
+    assert db.scalar(select(ZerodhaLoginState)) is None
+    connected=MagicMock();monkeypatch.setattr(zerodha,'connect',connected)
+    response=client.get('/integrations/zerodha/callback?request_token=testrequest&state='+raw,follow_redirects=False)
+    assert response.status_code==303 and response.headers['location'].endswith('?zerodha=connect_failed')
+    connected.assert_not_called()

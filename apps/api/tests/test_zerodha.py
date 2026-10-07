@@ -21,6 +21,8 @@ from app import database
 from app.config import settings
 from app.main import app
 from app.auth.service import require_access
+from app.auth import service as auth_service
+from app.models import DashboardSession, ZerodhaLoginState
 from types import SimpleNamespace
 from app.models import Holding, ZerodhaAccount, ZerodhaCredential, Bucket
 from app.integrations.zerodha import crypto, service, client as client_module
@@ -28,6 +30,8 @@ from app.integrations.zerodha.client import KiteClient
 from app.integrations.zerodha.exceptions import IntegrationError
 from app.integrations.zerodha.routes import CallbackLogFilter, integration_db
 
+from app.auth.passwords import password_hash
+TEST_HASH = password_hash('test-only-long-password')
 NOW = datetime.now(timezone.utc)
 TOKEN = 'testaccesstoken'
 RAW = {'exchange': 'NSE', 'tradingsymbol': 'NIFTYBEES', 'instrument_token': 123,
@@ -37,7 +41,10 @@ RAW = {'exchange': 'NSE', 'tradingsymbol': 'NIFTYBEES', 'instrument_token': 123,
 def config(monkeypatch):
     for field, value in {'ZERODHA_API_KEY': 'testapikey', 'ZERODHA_API_SECRET': SecretStr('testapisecret'),
                          'ZERODHA_REDIRECT_URL': 'http://127.0.0.1:8000/integrations/zerodha/callback',
-                         'TOKEN_ENCRYPTION_KEY': SecretStr(Fernet.generate_key().decode())}.items():
+                         'TOKEN_ENCRYPTION_KEY': SecretStr(Fernet.generate_key().decode()),
+                         'APP_ENV': 'development', 'DASHBOARD_URL': 'http://127.0.0.1:5173/',
+                         'DASHBOARD_USERNAME': 'test-household', 'DASHBOARD_PASSWORD_HASH': SecretStr(TEST_HASH),
+                         'SESSION_SECRET': SecretStr('test-session-secret-at-least-32-bytes')}.items():
         monkeypatch.setattr(settings, field, value)
     monkeypatch.setattr(KiteClient, '_request', lambda *a, **kw: pytest.fail('Unexpected provider request'))
 
@@ -48,17 +55,18 @@ def db():
     def configure(connection, record):
         connection.create_function('now', 0, lambda: datetime.now(timezone.utc).isoformat(' '))
         connection.execute('PRAGMA foreign_keys=ON')
-    for model in (ZerodhaAccount, ZerodhaCredential, Holding):
+    for model in (ZerodhaAccount, ZerodhaCredential, Holding, DashboardSession, ZerodhaLoginState):
         model.__table__.create(engine)
     with sessionmaker(engine, expire_on_commit=False)() as session:
         session.add(ZerodhaAccount(client_id='LOCAL_DEV', display_name='Primary Zerodha Account'))
+        session.add(DashboardSession(id=1, token_hash='isolated-test-session', credential_version=auth_service.credential_version(), expires_at=NOW+timedelta(hours=1)))
         session.commit()
         yield session
     engine.dispose()
 
 def api_call(path, method='GET', db=None):
     async def run():
-        app.dependency_overrides[require_access] = lambda: SimpleNamespace(token_hash="isolated-test-session")
+        app.dependency_overrides[require_access] = lambda: SimpleNamespace(id=1, token_hash="isolated-test-session")
         if db is not None:
             app.dependency_overrides[integration_db] = lambda: db
         try:
@@ -86,8 +94,8 @@ def test_missing_or_invalid_encryption_key(monkeypatch, key):
         crypto.encrypt_token(TOKEN)
     assert exc.value.code == 'configuration_missing'
 
-def test_login_url_and_cookie():
-    response = api_call('/integrations/zerodha/login')
+def test_login_url_and_cookie(db):
+    response = api_call('/integrations/zerodha/login', db=db)
     assert response.status_code == 200
     url = urlsplit(response.json()['login_url'])
     assert (url.scheme, url.netloc, url.path) == ('https', 'kite.zerodha.com', '/connect/login')
@@ -95,7 +103,11 @@ def test_login_url_and_cookie():
     assert params['api_key'] == ['testapikey'] and params['v'] == ['3']
     assert parse_qs(params['redirect_params'][0])['state']
     assert 'testapisecret' not in response.text
-    assert 'HttpOnly' in response.headers['set-cookie']
+    assert 'set-cookie' not in response.headers
+    raw = parse_qs(params['redirect_params'][0])['state'][0]
+    stored = db.scalar(select(ZerodhaLoginState))
+    assert len(raw) == 64 and stored.state_hash == hashlib.sha256(raw.encode()).hexdigest()
+    assert raw != stored.state_hash and stored.dashboard_session_id == 1
     assert response.headers['cache-control'] == 'no-store'
 
 @pytest.mark.parametrize('field', ['ZERODHA_API_KEY', 'ZERODHA_API_SECRET', 'ZERODHA_REDIRECT_URL', 'TOKEN_ENCRYPTION_KEY'])
@@ -108,7 +120,7 @@ def test_missing_config_fails_closed(monkeypatch, field):
 def callback_flow(db, monkeypatch, user_id='AB1234'):
     monkeypatch.setattr(KiteClient, 'exchange_token', lambda self, token: {'access_token': TOKEN, 'user_id': user_id})
     async def run():
-        app.dependency_overrides[require_access] = lambda: SimpleNamespace(token_hash="isolated-test-session")
+        app.dependency_overrides[require_access] = lambda: SimpleNamespace(id=1, token_hash="isolated-test-session")
         app.dependency_overrides[integration_db] = lambda: db
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1:8000') as client:
@@ -123,7 +135,7 @@ def callback_flow(db, monkeypatch, user_id='AB1234'):
 def test_callback_encrypted_upsert_and_status(db, monkeypatch):
     for _ in range(2):
         response = callback_flow(db, monkeypatch)
-        assert response.status_code == 200 and response.json() == {'status': 'connected'}
+        assert response.status_code == 303 and response.headers['location'].endswith('?zerodha=connected')
         assert TOKEN not in response.text and 'testapisecret' not in response.text
     assert db.scalar(select(func.count()).select_from(ZerodhaCredential)) == 1
     stored = db.scalar(select(ZerodhaCredential))
@@ -139,12 +151,12 @@ def test_callback_encrypted_upsert_and_status(db, monkeypatch):
 def test_callback_rejects_account_mismatch(db, monkeypatch):
     service.single_account(db).client_id = 'EXPECTED'
     db.commit()
-    assert callback_flow(db, monkeypatch, 'OTHER').status_code == 409
+    assert callback_flow(db, monkeypatch, 'OTHER').headers['location'].endswith('?zerodha=connect_failed')
     assert db.scalar(select(func.count()).select_from(ZerodhaCredential)) == 0
 
 def test_callback_rejects_missing_state(db):
     response = api_call('/integrations/zerodha/callback?request_token=testrequesttoken', db=db)
-    assert response.status_code == 400 and 'testrequesttoken' not in response.text
+    assert response.status_code == 303 and response.headers['location'].endswith('?zerodha=connect_failed') and 'testrequesttoken' not in response.text
 
 @pytest.mark.parametrize('symbol,bucket', [('NIFTYBEES', Bucket.NIFTY_50), ('MIDCAPETF', Bucket.MID_CAP), ('UNKNOWN', Bucket.UNCLASSIFIED)])
 def test_bucket_mapping(symbol, bucket):
@@ -442,7 +454,7 @@ def test_dashboard_callback_redirect_keeps_state_security(db, monkeypatch):
     monkeypatch.setattr(settings, 'DASHBOARD_URL', 'http://127.0.0.1:5173/')
     monkeypatch.setattr(KiteClient, 'exchange_token', lambda self, token: {'access_token': TOKEN, 'user_id': 'AB1234'})
     async def run():
-        app.dependency_overrides[require_access] = lambda: SimpleNamespace(token_hash="isolated-test-session")
+        app.dependency_overrides[require_access] = lambda: SimpleNamespace(id=1, token_hash="isolated-test-session")
         app.dependency_overrides[integration_db] = lambda: db
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1:8000') as client:
@@ -450,11 +462,11 @@ def test_dashboard_callback_redirect_keeps_state_security(db, monkeypatch):
                 params = parse_qs(urlsplit(response.json()['login_url']).query)
                 state = parse_qs(params['redirect_params'][0])['state'][0]
                 bad = await client.get('/integrations/zerodha/callback', params={'request_token':'testrequesttoken','state':state+'x'})
-                assert bad.status_code == 400
+                assert bad.status_code == 303 and bad.headers['location'].endswith('?zerodha=connect_failed')
                 good = await client.get('/integrations/zerodha/callback', params={'request_token':'testrequesttoken','state':state})
                 assert good.status_code == 303
-                assert good.headers['location'] == 'http://127.0.0.1:5173/'
-                assert 'Max-Age=0' in good.headers['set-cookie']
+                assert good.headers['location'] == 'http://127.0.0.1:5173/?zerodha=connected'
+                assert 'set-cookie' not in good.headers
                 assert good.headers['referrer-policy'] == 'no-referrer'
                 assert TOKEN not in good.text and TOKEN not in good.headers['location']
         finally:
@@ -480,21 +492,107 @@ def test_orders_and_trades_client_only_uses_get(monkeypatch):
 
 def test_production_callback_uses_configured_https_origin(db, monkeypatch):
     monkeypatch.setattr(settings, 'APP_ENV', 'production')
+    monkeypatch.setattr(settings, 'DASHBOARD_URL', 'https://dashboard.example.com/')
     monkeypatch.setattr(settings, 'ZERODHA_REDIRECT_URL', 'https://api.example.com/integrations/zerodha/callback')
     connected = MagicMock()
     monkeypatch.setattr(service, 'connect', connected)
     async def run():
-        app.dependency_overrides[require_access] = lambda: SimpleNamespace(token_hash="isolated-test-session")
+        app.dependency_overrides[require_access] = lambda: SimpleNamespace(id=1, token_hash="isolated-test-session")
         app.dependency_overrides[integration_db] = lambda: db
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://api.example.com') as client:
                 response = await client.get('/integrations/zerodha/login')
-                assert 'Secure' in response.headers['set-cookie']
+                assert 'set-cookie' not in response.headers
                 params = parse_qs(urlsplit(response.json()['login_url']).query)
                 state = parse_qs(params['redirect_params'][0])['state'][0]
                 response = await client.get('/integrations/zerodha/callback', params={'request_token':'testrequesttoken','state':state})
-                assert response.status_code == 200
+                assert response.status_code == 303 and response.headers['location'] == 'https://dashboard.example.com/?zerodha=connected'
         finally:
             app.dependency_overrides.clear()
     asyncio.run(run())
     connected.assert_called_once_with(db, 'testrequesttoken')
+
+
+def start_state(db):
+    response = api_call('/integrations/zerodha/login', db=db)
+    assert response.status_code == 200
+    return parse_qs(parse_qs(urlsplit(response.json()['login_url']).query)['redirect_params'][0])['state'][0]
+
+
+@pytest.mark.parametrize('failure', ['missing', 'unknown', 'expired', 'consumed', 'session_expired', 'revoked', 'rotated', 'wrong_url', 'provider_denied', 'duplicate'])
+def test_callback_correlation_failure_is_safe(db, monkeypatch, caplog, failure):
+    raw = start_state(db)
+    row = db.scalar(select(ZerodhaLoginState))
+    session = db.get(DashboardSession, 1)
+    if failure == 'expired': row.expires_at = NOW - timedelta(seconds=1)
+    if failure == 'consumed': row.consumed_at = NOW
+    if failure == 'session_expired': session.expires_at = NOW - timedelta(seconds=1)
+    if failure == 'revoked': db.delete(session)
+    db.commit()
+    if failure == 'rotated': monkeypatch.setattr(settings, 'DASHBOARD_USERNAME', 'rotated')
+    if failure == 'wrong_url': monkeypatch.setattr(settings, 'ZERODHA_REDIRECT_URL', 'http://127.0.0.1:8001/integrations/zerodha/callback')
+    state = '' if failure == 'missing' else ('a'*64 if failure == 'unknown' else raw)
+    path = '/integrations/zerodha/callback?request_token=testrequesttoken&state='+state
+    if failure == 'provider_denied': path += '&status=error'
+    if failure == 'duplicate': path += '&state='+raw
+    exchange = MagicMock(); monkeypatch.setattr(KiteClient, 'exchange_token', exchange)
+    result = api_call(path, db=db)
+    assert result.status_code == 303
+    assert result.headers['location'] == 'http://127.0.0.1:5173/?zerodha=connect_failed'
+    exchange.assert_not_called()
+    assert raw not in caplog.text and 'testrequesttoken' not in caplog.text
+    assert raw not in result.text and 'testrequesttoken' not in result.headers['location']
+
+
+def test_callback_without_cookie_and_replay(db, monkeypatch):
+    raw = start_state(db)
+    exchange = MagicMock(return_value={'access_token': TOKEN, 'user_id':'AB1234'})
+    monkeypatch.setattr(KiteClient, 'exchange_token', exchange)
+    path = '/integrations/zerodha/callback?request_token=testrequesttoken&state='+raw
+    # Each helper uses a new browser with no cookie. No callback access override is needed.
+    assert api_call(path, db=db).headers['location'].endswith('?zerodha=connected')
+    assert api_call(path, db=db).headers['location'].endswith('?zerodha=connect_failed')
+    exchange.assert_called_once_with('testrequesttoken')
+
+
+def test_exchange_failure_consumes_state_without_partial_credentials(db, monkeypatch, caplog):
+    raw = start_state(db)
+    exchange = MagicMock(side_effect=RuntimeError(raw+' testrequesttoken '+TOKEN))
+    monkeypatch.setattr(KiteClient, 'exchange_token', exchange)
+    path = '/integrations/zerodha/callback?request_token=testrequesttoken&state='+raw
+    for _ in range(2): assert api_call(path, db=db).headers['location'].endswith('?zerodha=connect_failed')
+    assert exchange.call_count == 1
+    assert db.scalar(select(ZerodhaCredential)) is None
+    db.expire_all()
+    assert db.scalar(select(ZerodhaLoginState)).consumed_at is not None
+    assert raw not in caplog.text and TOKEN not in caplog.text and 'testrequesttoken' not in caplog.text
+
+
+def test_state_concurrent_claim_has_one_winner(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from app.integrations.zerodha import login_state
+    engine = create_engine('sqlite:///'+str(tmp_path/'state.db'), connect_args={'check_same_thread':False, 'timeout':10})
+    @event.listens_for(engine, 'connect')
+    def configure(connection, record):
+        connection.create_function('now', 0, lambda: auth_service.now().isoformat(' '))
+        connection.execute('PRAGMA foreign_keys=ON')
+    for model in (DashboardSession, ZerodhaAccount, ZerodhaLoginState): model.__table__.create(engine)
+    factory = sessionmaker(engine)
+    with factory() as db:
+        session = DashboardSession(token_hash='test-session',credential_version=auth_service.credential_version(),expires_at=NOW+timedelta(hours=1))
+        db.add_all([session,ZerodhaAccount(client_id='LOCAL_DEV',display_name='Test')]);db.commit()
+        raw = login_state.create(db,session)
+    barrier = Barrier(2)
+    def claim():
+        with factory() as db:
+            barrier.wait()
+            try:
+                login_state.claim(db,raw)
+                return True
+            except (login_state.StateRejected, OperationalError):
+                db.rollback()
+                return False
+    with ThreadPoolExecutor(max_workers=2) as pool: assert list(pool.map(lambda _:claim(),range(2))).count(True)==1
+    with factory() as db: assert db.scalar(select(ZerodhaLoginState)).consumed_at is not None
+    engine.dispose()

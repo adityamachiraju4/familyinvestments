@@ -64,9 +64,10 @@ uvicorn app.main:app --reload --port 8000
 
 After signing into the household dashboard, use **Connect Zerodha for today**.
 The authenticated frontend fetches the login URL with its dashboard CSRF token;
-follow the normal Kite browser flow within ten minutes. The login response sets
-an HttpOnly state cookie; the callback verifies it, the dashboard session binding
-and the registered callback location. Kite redirects to the registered URL;
+follow the normal Kite browser flow within ten minutes. The login response contains a random opaque state in `redirect_params`. PostgreSQL
+stores only its SHA-256 hash, account/session binding and ten-minute expiry. The
+callback verifies this one-time correlation and the registered callback location
+without requiring browser cookies. Kite redirects to the registered URL;
 `redirect_params` carries state and does not override that URL. Do not manually
 paste callback tokens into terminal commands or logs. Direct unauthenticated
 login initiation is rejected.
@@ -217,7 +218,7 @@ CNC BUY executions missing sufficient matching active holdings are `AWAITING_HOL
 
 `refresh_portfolio(db, if_stale=False)` is reusable by a future external scheduled job with a managed DB session. No scheduler or cron endpoint is added, and nothing is deployed. Day-only trade books require daily collection to build history. Keep local services bound to loopback; configure dashboard authentication before starting them.
 
-Connection status adds local `token_valid`, backend `refresh_required` and `last_refresh_at`; early provider invalidation is detected on a read. Login's `return_to_dashboard=true` carries the return intent in encrypted callback state. Destination comes solely from backend `DASHBOARD_URL` (HTTPS in production, HTTP loopback allowed locally), with no credentials/query/fragment. The local default is `http://127.0.0.1:5173/`. Existing state cookie, TTL and exact callback validation remain enforced. Successful reconnect invalidates refresh freshness.
+Connection status adds local `token_valid`, backend `refresh_required` and `last_refresh_at`; early provider invalidation is detected on a read. Login always creates a persisted one-time correlation and returns to the dashboard after callback. The optional legacy `return_to_dashboard` parameter remains accepted. Destination comes solely from backend `DASHBOARD_URL` (HTTPS in production, HTTP loopback allowed locally), with no credentials/query/fragment. The local default is `http://127.0.0.1:5173/`. The ten-minute TTL, valid initiating session, atomic consumption and exact callback validation are enforced. Successful reconnect invalidates refresh freshness.
 
 Apply `0003_execution_activity` after `0002_holding_lifecycle`. It extends existing orders/transactions/account tables and preserves existing records. Downgrade refuses unknown null charges/net amounts through PostgreSQL's NOT NULL constraint instead of inventing values; plan a deliberate data migration before downgrading.
 
@@ -298,10 +299,9 @@ verify `/health/db` after configuration.
 Manual steps before public access: provision/reference PostgreSQL, verify backup
 and migration results, configure secrets/domains/proxy trust, and register the
 Kite callback. Zerodha authentication still requires a manual browser login when
-the access token expires; no password/PIN/TOTP automation is provided. Use API and
-frontend custom domains on the same site to preserve the existing SameSite=Lax
-login-state cookie; unrelated domains can block the frontend's credentialed login
-request. Check the callback in a real browser after eventual deployment.
+the access token expires; no password/PIN/TOTP automation is provided. The callback supports the Vercel/Railway cross-site topology without cookies.
+Unrelated domains can still block the frontend's credentialed household login
+request; same-site custom domains improve reliability of those API fetches. Check the callback in a real browser after eventual deployment.
 
 Household session authentication protects financial endpoints. CORS remains a browser origin policy, not a substitute for authentication. Configure and verify the access boundary before public deployment.
 Railway/proxy log retention must also exclude callback query strings; application
@@ -367,9 +367,9 @@ invalidates prior sessions. Expired sessions are rejected server-side and pruned
 on successful logins; there is no sliding refresh or localStorage bearer token.
 CSRF tokens returned only to authenticated frontend code remain in memory. All
 private POSTs and GET Zerodha login initiation require exact allowed Origin plus
-this token. Brokerage callback uses its existing encrypted nonce, HttpOnly state
-cookie, ten-minute TTL and exact callback URL checks, additionally bound to the
-same valid dashboard session. If the session expires or is revoked during the
+this token. Brokerage callback uses a persisted hashed opaque correlation, ten-minute TTL
+and exact callback URL checks, bound to the still-valid initiating dashboard
+session. The callback itself does not require the dashboard cookie. If the session expires or is revoked during the
 brokerage flow, sign in and restart the flow; callback validation is never bypassed.
 
 Production cookie: `__Host-dashboard_session`, HttpOnly, Secure, SameSite=None,
@@ -380,8 +380,8 @@ Different HTTPS origins work when browser cookie policy permits them; default
 Vercel and Railway domains are cross-site and third-party-cookie restrictions can
 block cookies despite correct CORS. **For reliable deployment use same-site custom
 origins, e.g. dashboard.example.com on Vercel and api.example.com on Railway.**
-This also preserves the existing SameSite=Lax Zerodha state cookie without changing
-brokerage auth semantics. No broad cookie domain is needed. Verify real browser
+Brokerage callbacks use one-time database correlations and work independently of
+third-party or partitioned cookies. No broad cookie domain is needed. Verify real browser
 login/logout/callback in the final topology before public access. The frontend
 checks that a successful login actually created a usable cookie and explains
 cookie blocking when it did not. Do not weaken CSRF or cookie security to fix it.
@@ -405,3 +405,59 @@ logs as well and preserve the existing callback query exclusion.
 References: [OWASP password storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html),
 [session management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html),
 [MDN third-party cookies](https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Third-party_cookies).
+
+
+## Cookie-independent Zerodha callback (migration 0006)
+
+The authenticated, Origin/CSRF-checked `/integrations/zerodha/login` generates
+256 random bits, returns the opaque value through Kite `redirect_params`, and
+persists only SHA-256 of that value in `zerodha_login_states`. Its foreign keys
+bind the configured account and initiating dashboard session; expiry is the
+shorter of ten minutes and session expiry. No session/account identifier enters
+the login URL. Logout deletes the session and cascades its correlations;
+credential rotation and expired sessions are rejected when claiming state.
+
+The callback locks/revalidates the session and atomically updates an unconsumed,
+unexpired state with `UPDATE ... RETURNING`. That claim commits **before** any
+external token exchange. Only one concurrent claimant can exchange; failed
+exchanges, timeouts, crashes or token persistence failures require a new connect
+attempt. Existing exchange validation, account identity checks and encrypted
+credential storage remain intact. An account row lock serializes binding across
+different login attempts. Logout/revocation before the claim blocks completion;
+revocation after a committed claim cannot cancel an already-authorized exchange.
+Expired rows remain until their session is deleted/pruned; no background cleanup
+job or startup migration is introduced.
+
+Success redirects with HTTP 303 to `DASHBOARD_URL?zerodha=connected`; ordinary
+invalid/expired/replayed state and provider failures use `?zerodha=connect_failed`.
+These markers contain no tokens or security details. Destination is server-only,
+validated configuration, with no query/fragment/credentials. Responses are
+`no-store` and `no-referrer`; logs contain fixed failure reason codes only.
+Infrastructure access logs must also exclude the whole callback query string.
+The frontend removes the marker while preserving other query parameters/hash,
+checks household authentication, fetches brokerage status and performs one
+controlled canonical portfolio refresh on successful connection. A forged marker
+cannot connect an account or bypass household authentication.
+
+After review and a separately authorized commit/push:
+
+1. Railway pre-deploy command: `alembic upgrade head` from `apps/api`; verify
+   `0006_zerodha_login_state` before switching backend traffic. The migration adds
+   only a table/index, leaving existing financial/auth tables intact.
+2. Deploy backend and redeploy the changed frontend.
+3. Set `DASHBOARD_URL=https://familyinvestments.vercel.app`,
+   `FRONTEND_ORIGIN=https://familyinvestments.vercel.app`, and
+   `ZERODHA_REDIRECT_URL=https://familyinvestments-production.up.railway.app/integrations/zerodha/callback`.
+   Register that exact redirect URL in Kite. Keep existing backend-only database,
+   Zerodha, encryption and household auth secrets unchanged.
+4. Preserve public HTTPS scheme/Host via trusted proxy forwarded headers using
+   existing Railway/Uvicorn configuration; no new application middleware is needed.
+5. Sign into the household dashboard, click **Connect Zerodha for today**, manually
+   authenticate with Kite, verify Railway callback returns to Vercel, connection
+   status is connected and canonical refresh completes. Reconnect manually when
+   the daily access token expires. Verify logout and replay rejection as well.
+
+No deployment or live brokerage authentication was performed by this change.
+Actual Railway proxy behavior and browser cookie policy require this final live
+check. If household cookies cannot be used for Vercel-to-Railway API fetches,
+use same-site custom domains; the callback fix cannot override browser policy.

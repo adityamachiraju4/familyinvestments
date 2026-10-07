@@ -77,3 +77,10 @@ it("refuses HTTP password transport from an HTTPS dashboard", () => {
   expect(() => validateAuthTransport("https:", "https://api.example.com")).not.toThrow();
   expect(() => validateAuthTransport("http:", "http://127.0.0.1:8000")).not.toThrow();
 });
+it("callback success marker cannot bypass household authentication", async () => {
+  const fetch = responses(false);
+  render(<MemoryRouter initialEntries={["/?zerodha=connected"]}><App /></MemoryRouter>);
+  expect(await screen.findByLabelText("Password")).toBeInTheDocument();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  expect(screen.queryByText("Zerodha connected successfully.")).not.toBeInTheDocument();
+});

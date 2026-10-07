@@ -27,7 +27,7 @@ API_ROOT = Path(__file__).resolve().parents[1]
 TABLES = {
     "zerodha_accounts", "zerodha_credentials", "holdings", "portfolio_snapshots",
     "holding_snapshots", "orders", "monthly_targets", "investment_transactions",
-    "dashboard_sessions", "dashboard_login_attempts",
+    "dashboard_sessions", "dashboard_login_attempts", "zerodha_login_states",
 }
 UNIQUES = {
     "zerodha_accounts": ("client_id",),
@@ -228,6 +228,11 @@ def test_frozen_migration_matches_model_metadata(monkeypatch):
     spec.loader.exec_module(auth)
     monkeypatch.setattr(auth, "op", operations)
     auth.upgrade()
+    spec = importlib.util.spec_from_file_location("zerodha_login", API_ROOT / "alembic/versions/0006_zerodha_login_state.py")
+    login_state = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(login_state)
+    monkeypatch.setattr(login_state, "op", operations)
+    login_state.upgrade()
     assert set(metadata.tables) == TABLES
     dialect = postgresql.dialect()
     for name in TABLES:
