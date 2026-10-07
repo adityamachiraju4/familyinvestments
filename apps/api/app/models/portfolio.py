@@ -3,7 +3,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, String, UniqueConstraint
+from sqlalchemy import Boolean, true, BigInteger, DateTime, ForeignKey, Index, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.database import Base
@@ -27,8 +27,9 @@ class Holding(Base):
     current_value: Mapped[Decimal] = mapped_column(MONEY)
     unrealised_pnl: Mapped[Decimal] = mapped_column(MONEY)
     unrealised_pnl_percent: Mapped[Decimal] = mapped_column(PERCENT)
-    bucket: Mapped[Bucket] = mapped_column(BUCKET, default=Bucket.OTHER, server_default="OTHER")
+    bucket: Mapped[Bucket] = mapped_column(BUCKET, default=Bucket.UNCLASSIFIED, server_default="UNCLASSIFIED")
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
 
 
 class PortfolioSnapshot(CreatedAt, Base):
@@ -50,6 +51,7 @@ class PortfolioSnapshot(CreatedAt, Base):
     midcap_value: Mapped[Decimal] = mapped_column(MONEY)
     smallcap_value: Mapped[Decimal] = mapped_column(MONEY)
     other_value: Mapped[Decimal] = mapped_column(MONEY)
+    unclassified_value: Mapped[Decimal | None] = mapped_column(MONEY)
 
 
 class HoldingSnapshot(CreatedAt, Base):
@@ -64,7 +66,7 @@ class HoldingSnapshot(CreatedAt, Base):
     snapshot_date: Mapped[date]
     exchange: Mapped[str] = mapped_column(String(16))
     tradingsymbol: Mapped[str] = mapped_column(String(128))
-    bucket: Mapped[Bucket] = mapped_column(BUCKET, default=Bucket.OTHER, server_default="OTHER")
+    bucket: Mapped[Bucket] = mapped_column(BUCKET, default=Bucket.UNCLASSIFIED, server_default="UNCLASSIFIED")
     quantity: Mapped[int]
     average_price: Mapped[Decimal] = mapped_column(MONEY)
     last_price: Mapped[Decimal] = mapped_column(MONEY)

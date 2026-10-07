@@ -128,7 +128,7 @@ def test_callback_encrypted_upsert_and_status(db, monkeypatch):
     assert crypto.decrypt_token(stored.encrypted_access_token) == TOKEN
     assert stored.token_expires_at > stored.token_created_at
     status = api_call('/integrations/zerodha/status', db=db)
-    assert set(status.json()) == {'connection_status', 'last_authenticated_at', 'last_sync_at', 'credentials_present'}
+    assert {'connection_status', 'last_authenticated_at', 'last_sync_at', 'credentials_present', 'token_valid', 'refresh_required', 'last_refresh_at'} == set(status.json())
     assert status.json()['connection_status'] == 'connected' and status.json()['credentials_present']
     assert service.single_account(db).client_id == 'AB1234'
 
@@ -142,9 +142,9 @@ def test_callback_rejects_missing_state(db):
     response = api_call('/integrations/zerodha/callback?request_token=testrequesttoken', db=db)
     assert response.status_code == 400 and 'testrequesttoken' not in response.text
 
-@pytest.mark.parametrize('symbol,bucket', [('NIFTYBEES', Bucket.NIFTY_50), ('MIDCAPETF', Bucket.MID_CAP), ('UNKNOWN', Bucket.OTHER)])
+@pytest.mark.parametrize('symbol,bucket', [('NIFTYBEES', Bucket.NIFTY_50), ('MIDCAPETF', Bucket.MID_CAP), ('UNKNOWN', Bucket.UNCLASSIFIED)])
 def test_bucket_mapping(symbol, bucket):
-    assert service.bucket_for(symbol) == bucket
+    assert service.classify_instrument(symbol, "NSE") == bucket
 
 def test_decimal_normalization_and_zero_cost():
     values = service.normalize_holding(RAW, 22, NOW)
@@ -171,14 +171,17 @@ def test_holdings_upsert_preserves_absent_rows(db, monkeypatch):
     assert original.id == original_id and original.quantity == 4
     assert db.scalar(select(func.count()).select_from(Holding)) == 1
     assert service.single_account(db).last_sync_at is not None
-    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [])
-    assert service.sync_holdings(db) == 0
-    assert db.scalar(select(func.count()).select_from(Holding)) == 1
     response = api_call('/portfolio/holdings', db=db)
     assert response.status_code == 200
     row = response.json()[0]
     assert row['quantity'] == 4 and row['bucket'] == 'NIFTY_50' and row['invested_value'] == '0.4000'
     assert 'account_id' not in row and 'access_token' not in response.text
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [])
+    assert service.sync_holdings(db) == 0
+    assert db.scalar(select(func.count()).select_from(Holding)) == 1
+    db.refresh(original)
+    assert original.is_active is False
+    assert api_call('/portfolio/holdings', db=db).json() == []
 
 def test_no_partial_sync_on_invalid_payload(db, monkeypatch):
     store_token(db)
@@ -254,8 +257,8 @@ def test_provider_transport_patterns_and_sanitization(monkeypatch):
 def test_routes_have_no_order_mutations():
     paths = app.openapi()['paths']
     assert '/portfolio/holdings' in paths and '/portfolio/funds' in paths
-    assert not any('order' in path for path in paths)
-    assert {(path, method) for path, methods in paths.items() for method in methods if method in {'post', 'put', 'patch', 'delete'}} == {('/integrations/zerodha/sync/holdings', 'post'), ('/portfolio/snapshots/today', 'post')}
+    assert not any(path.startswith('/orders') for path in paths)
+    assert {(path, method) for path, methods in paths.items() for method in methods if method in {'post', 'put', 'patch', 'delete'}} == {('/integrations/zerodha/sync/holdings', 'post'), ('/portfolio/snapshots/today', 'post'), ('/portfolio/refresh', 'post')}
 
 @pytest.mark.parametrize('status,payload,code', [
     (401, {'message': TOKEN}, 'credentials_invalid'),
@@ -293,7 +296,7 @@ def test_provider_timeout_sanitized(monkeypatch):
 
 def test_status_disconnected_without_credentials(db):
     response = api_call('/integrations/zerodha/status', db=db)
-    assert response.json() == {'connection_status': 'disconnected', 'last_authenticated_at': None, 'last_sync_at': None, 'credentials_present': False}
+    assert response.json() == {'connection_status': 'disconnected', 'last_authenticated_at': None, 'last_sync_at': None, 'credentials_present': False, 'token_valid': False, 'refresh_required': True, 'last_refresh_at': None}
 
 
 def test_duplicate_holdings_rejected_before_writes(db, monkeypatch):
@@ -318,3 +321,153 @@ def test_funds_provider_failure_is_safe_http_response(db, monkeypatch):
     response = api_call('/portfolio/funds', db=db)
     assert response.status_code == 502
     assert response.json() == {'error': 'provider_error', 'message': 'Zerodha request failed'}
+
+
+@pytest.mark.parametrize('old_exchange,new_exchange', [('NSE', 'NSE'), ('BSE', 'NSE'), ('NSE', 'BSE')])
+def test_reconcile_identity_and_repeat_without_deletion(db, monkeypatch, old_exchange, new_exchange):
+    # Exercise a real non-default account ID; lifecycle never assumes ID 1.
+    account = service.single_account(db)
+    account.id = 42
+    db.commit()
+    store_token(db)
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [{**RAW, 'exchange': old_exchange}])
+    assert service.sync_holdings(db) == 1
+    old = db.scalar(select(Holding))
+    old_id = old.id
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [{**RAW, 'exchange': new_exchange}])
+    for _ in range(2):
+        assert service.sync_holdings(db) == 1
+        rows = db.scalars(select(Holding)).all()
+        assert len(rows) == (1 if old_exchange == new_exchange else 2)
+        assert {r.exchange for r in rows if r.is_active} == {new_exchange}
+        assert all(r.account_id == 42 for r in rows)
+        assert db.get(Holding, old_id) is not None
+        response = api_call('/portfolio/holdings', db=db)
+        assert len(response.json()) == 1
+        assert response.json()[0]['exchange'] == new_exchange
+        assert 'is_active' not in response.json()[0]
+
+
+def test_disappeared_holding_preserved_and_reactivated(db, monkeypatch):
+    store_token(db)
+    other = {**RAW, 'tradingsymbol': 'OLDSTOCK', 'instrument_token': 456}
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [RAW, other])
+    service.sync_holdings(db)
+    old_id = db.scalar(select(Holding.id).where(Holding.tradingsymbol == 'OLDSTOCK'))
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [RAW])
+    service.sync_holdings(db)
+    assert db.get(Holding, old_id).is_active is False
+    assert len(api_call('/portfolio/holdings', db=db).json()) == 1
+    assert db.scalar(select(func.count()).select_from(Holding)) == 2
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [RAW, other])
+    service.sync_holdings(db)
+    assert db.get(Holding, old_id).is_active is True
+    assert db.scalar(select(func.count()).select_from(Holding)) == 2
+
+
+@pytest.mark.parametrize('payload', [None, {}, {'data': [RAW], 'partial': True}, [RAW, {'invalid': True}], [RAW, RAW]])
+def test_invalid_or_partial_response_preserves_membership(db, monkeypatch, payload):
+    store_token(db)
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [RAW])
+    service.sync_holdings(db)
+    previous_sync = service.single_account(db).last_sync_at
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: payload)
+    assert api_call('/integrations/zerodha/sync/holdings', 'POST', db).status_code == 502
+    assert db.scalar(select(Holding)).is_active is True
+    assert service.single_account(db).last_sync_at == previous_sync
+
+
+@pytest.mark.parametrize('code', ['provider_error', 'credentials_invalid'])
+def test_failed_fetch_keeps_existing_membership(db, monkeypatch, code):
+    store_token(db)
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [RAW])
+    service.sync_holdings(db)
+    previous_sync = service.single_account(db).last_sync_at
+    def fail(self):
+        raise IntegrationError(code, 'Safe provider failure', 401 if code == 'credentials_invalid' else 502)
+    monkeypatch.setattr(KiteClient, 'get_holdings', fail)
+    with pytest.raises(IntegrationError):
+        service.sync_holdings(db)
+    assert db.scalar(select(Holding)).is_active is True
+    assert service.single_account(db).last_sync_at == previous_sync
+
+
+@pytest.mark.parametrize('failure_point', ['second_insert', 'after_reconcile', 'commit'])
+def test_reconciliation_database_failure_atomic(db, monkeypatch, failure_point):
+    store_token(db)
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [RAW])
+    service.sync_holdings(db)
+    previous_sync = service.single_account(db).last_sync_at
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [
+        {**RAW, 'exchange': 'BSE'}, {**RAW, 'tradingsymbol': 'NEWSTOCK'},
+    ])
+    execute = db.execute
+    inserts = 0
+    def failing_execute(statement, *args, **kwargs):
+        nonlocal inserts
+        if getattr(statement, 'is_insert', False):
+            inserts += 1
+            if failure_point == 'second_insert' and inserts == 2:
+                raise OperationalError(None, None, Exception('private database details'))
+        result = execute(statement, *args, **kwargs)
+        if failure_point == 'after_reconcile' and getattr(statement, 'is_update', False):
+            raise OperationalError(None, None, Exception('private database details'))
+        return result
+    monkeypatch.setattr(db, 'execute', failing_execute)
+    if failure_point == 'commit':
+        monkeypatch.setattr(db, 'commit', MagicMock(side_effect=OperationalError(None, None, Exception('private'))))
+    with pytest.raises(IntegrationError) as exc:
+        service.sync_holdings(db)
+    assert exc.value.code == 'database_unavailable' and 'private' not in str(exc.value)
+    rows = db.scalars(select(Holding)).all()
+    assert len(rows) == 1 and rows[0].exchange == 'NSE' and rows[0].is_active is True
+    assert service.single_account(db).last_sync_at == previous_sync
+
+
+def test_complete_empty_list_reconciles_to_no_current_holdings(db, monkeypatch):
+    store_token(db)
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [RAW])
+    service.sync_holdings(db)
+    monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [])
+    assert service.sync_holdings(db) == 0
+    assert db.scalar(select(Holding)).is_active is False
+    assert api_call('/portfolio/holdings', db=db).json() == []
+
+
+def test_dashboard_callback_redirect_keeps_state_security(db, monkeypatch):
+    monkeypatch.setattr(settings, 'DASHBOARD_URL', 'http://127.0.0.1:5173/')
+    monkeypatch.setattr(KiteClient, 'exchange_token', lambda self, token: {'access_token': TOKEN, 'user_id': 'AB1234'})
+    async def run():
+        app.dependency_overrides[integration_db] = lambda: db
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1:8000') as client:
+                response = await client.get('/integrations/zerodha/login?return_to_dashboard=true&return_url=https://untrusted.example')
+                params = parse_qs(urlsplit(response.json()['login_url']).query)
+                state = parse_qs(params['redirect_params'][0])['state'][0]
+                bad = await client.get('/integrations/zerodha/callback', params={'request_token':'testrequesttoken','state':state+'x'})
+                assert bad.status_code == 400
+                good = await client.get('/integrations/zerodha/callback', params={'request_token':'testrequesttoken','state':state})
+                assert good.status_code == 303
+                assert good.headers['location'] == 'http://127.0.0.1:5173/'
+                assert 'Max-Age=0' in good.headers['set-cookie']
+                assert good.headers['referrer-policy'] == 'no-referrer'
+                assert TOKEN not in good.text and TOKEN not in good.headers['location']
+        finally:
+            app.dependency_overrides.clear()
+    asyncio.run(run())
+    assert service.single_account(db).last_refresh_at is None
+
+
+def test_status_reports_expired_stored_token(db):
+    service.single_account(db).connection_status = 'connected'
+    store_token(db, NOW - timedelta(hours=1))
+    result = api_call('/integrations/zerodha/status', db=db).json()
+    assert result['connection_status'] == 'expired' and result['token_valid'] is False
+
+
+def test_orders_and_trades_client_only_uses_get(monkeypatch):
+    calls = []
+    monkeypatch.setattr(KiteClient, '_request', lambda self, method, path: calls.append((method,path)) or [])
+    client = KiteClient(TOKEN)
+    assert client.get_orders() == [] and client.get_trades() == []
+    assert calls == [('GET','/orders'),('GET','/trades')]

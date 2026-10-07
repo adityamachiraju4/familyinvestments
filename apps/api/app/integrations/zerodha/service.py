@@ -5,11 +5,12 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from zoneinfo import ZoneInfo
 
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import select, tuple_, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import Session
 
-from app.integrations.zerodha.buckets import bucket_for
+from app.integrations.zerodha.buckets import classify_instrument
 from app.integrations.zerodha.client import KiteClient, require_config
 from app.integrations.zerodha.crypto import decrypt_token, encrypt_token
 from app.integrations.zerodha.exceptions import IntegrationError, credentials_error, provider_error
@@ -66,6 +67,7 @@ def connect(db: Session, request_token: str) -> None:
     account.client_id = session.user_id
     account.connection_status = "connected"
     account.last_authenticated_at = now
+    account.last_refresh_at = None
     db.commit()
 
 
@@ -117,27 +119,60 @@ def normalize_holding(payload: dict, account_id: int, synced_at: datetime) -> di
             "tradingsymbol": holding.tradingsymbol, "instrument_token": holding.instrument_token,
             "quantity": holding.quantity, "t1_quantity": holding.t1_quantity,
             "unrealised_pnl_percent": percent,
-            "bucket": bucket_for(holding.tradingsymbol), "synced_at": synced_at,
+            "bucket": classify_instrument(holding.tradingsymbol, holding.exchange, holding.instrument_token), "synced_at": synced_at,
         }
     except (ValidationError, InvalidOperation):
         raise provider_error() from None
 
 
-def sync_holdings(db: Session) -> int:
-    account = single_account(db)
-    payload = authenticated_client(db, account).get_holdings()
+def validated_holdings(payload, account_id: int, now: datetime) -> list[dict]:
     if not isinstance(payload, list):
         raise provider_error()
-    now = datetime.now(timezone.utc)
-    rows = [normalize_holding(row, account.id, now) for row in payload]
-    if len({(r["exchange"], r["tradingsymbol"]) for r in rows}) != len(rows):
+    rows = [normalize_holding(row, account_id, now) for row in payload]
+    if len({(row["exchange"], row["tradingsymbol"]) for row in rows}) != len(rows):
         raise provider_error()
+    return rows
+
+
+def persist_holdings(db: Session, account: ZerodhaAccount, rows: list[dict], now: datetime) -> None:
+    """Caller holds the account lock and owns commit/rollback."""
+    keys = [(row["exchange"], row["tradingsymbol"]) for row in rows]
     for row in rows:
+        row = {**row, "is_active": True}
         stmt = insert(Holding).values(**row)
         db.execute(stmt.on_conflict_do_update(
             index_elements=[Holding.account_id, Holding.exchange, Holding.tradingsymbol],
             set_={key: value for key, value in row.items() if key not in {"account_id", "exchange", "tradingsymbol"}},
         ))
+    stale = update(Holding).where(Holding.account_id == account.id)
+    if keys:
+        stale = stale.where(tuple_(Holding.exchange, Holding.tradingsymbol).not_in(keys))
+    db.execute(stale.values(is_active=False).execution_options(synchronize_session=False))
     account.last_sync_at = now
-    db.commit()
-    return len(rows)
+    db.flush()
+    db.expire_all()
+
+
+def lock_account(db: Session) -> ZerodhaAccount:
+    account = single_account(db)
+    return db.scalars(select(ZerodhaAccount).where(
+        ZerodhaAccount.id == account.id,
+    ).with_for_update().execution_options(populate_existing=True)).one()
+
+
+def sync_holdings(db: Session) -> int:
+    """Validate and reconcile the complete provider list, without physical deletion."""
+    try:
+        account = lock_account(db)
+        payload = authenticated_client(db, account).get_holdings()
+        now = datetime.now(timezone.utc)
+        rows = validated_holdings(payload, account.id, now)
+        persist_holdings(db, account, rows, now)
+        db.commit()
+        return len(rows)
+    except SQLAlchemyError:
+        db.rollback()
+        raise IntegrationError("database_unavailable", "Holdings sync operation failed") from None
+    except Exception:
+        db.rollback()
+        raise

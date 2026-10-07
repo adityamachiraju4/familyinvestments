@@ -241,4 +241,55 @@ def test_month_validation(db, month):
 
 def test_individual_equities_remain_other():
     for symbol in ('ETERNAL', 'FEDERALBNK', 'HDFCBANK', 'HINDUNILVR', 'KWIL', 'NYKAA', 'HDFCLIFE', 'INFY', 'KARURVYSYA', 'PNB'):
-        assert zerodha.bucket_for(symbol) == Bucket.OTHER
+        assert zerodha.classify_instrument(symbol, "NSE") == Bucket.OTHER
+
+
+def test_inactive_excluded_from_all_current_views_and_snapshots(db, monkeypatch):
+    active = add_holding(db, 'CURRENT', bucket=Bucket.OTHER, invested='100', market='120')
+    stale = add_holding(db, 'STALE', bucket=Bucket.NIFTY_50, invested='500', market='700')
+    old_day = date(2026, 10, 5)
+    monkeypatch.setattr(service, 'today', lambda: old_day)
+    old_snapshot = service.snapshot_today(db)
+    old_children = db.scalars(select(HoldingSnapshot).where(HoldingSnapshot.snapshot_date == old_day)).all()
+    original_history = [(r.id, r.market_value, r.created_at) for r in old_children]
+    monkeypatch.setattr(service, 'today', lambda: DAY)
+    incorrect = service.snapshot_today(db)
+    incorrect_id = incorrect.id
+    stale.is_active = False
+    db.commit()
+    response = request(db, '/portfolio/holdings')
+    assert [r['tradingsymbol'] for r in response.json()] == ['CURRENT']
+    values = request(db, '/portfolio/summary').json()
+    assert values['holding_count'] == 1
+    assert Decimal(values['holdings_invested_value']) == Decimal('100')
+    assert Decimal(values['holdings_market_value']) == Decimal('120')
+    assert Decimal(values['total_pnl']) == Decimal('20')
+    assert Decimal(values['allocation']['OTHER']) == Decimal('120')
+    assert Decimal(values['allocation']['NIFTY_50']) == 0
+    corrected = service.snapshot_today(db)
+    assert corrected.id == incorrect_id
+    assert corrected.holdings_invested_value == Decimal('100')
+    assert corrected.holdings_market_value == Decimal('120')
+    assert corrected.total_account_value == Decimal('5219.50')
+    assert corrected.nifty_value == 0 and corrected.other_value == Decimal('120')
+    assert db.scalar(select(func.count()).select_from(PortfolioSnapshot)) == 2
+    todays_children = db.scalars(select(HoldingSnapshot).where(HoldingSnapshot.snapshot_date == DAY)).all()
+    assert [r.tradingsymbol for r in todays_children] == ['CURRENT']
+    assert db.scalar(select(func.count()).select_from(Holding)) == 2
+    assert db.get(Holding, stale.id).is_active is False
+    db.refresh(old_snapshot)
+    assert old_snapshot.holdings_market_value == Decimal('820')
+    for row in old_children:
+        db.refresh(row)
+    assert [(r.id, r.market_value, r.created_at) for r in old_children] == original_history
+    assert len(service.holding_history(db, 'STALE', 30)) == 1
+
+
+def test_inactive_holding_never_generates_new_snapshot(db):
+    stale = add_holding(db)
+    stale.is_active = False
+    db.commit()
+    result = service.snapshot_today(db)
+    assert result.holdings_market_value == 0
+    assert result.total_account_value == Decimal('5099.50')
+    assert db.scalar(select(func.count()).select_from(HoldingSnapshot)) == 0

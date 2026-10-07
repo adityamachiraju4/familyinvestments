@@ -10,8 +10,7 @@ construction does not open a connection. `get_db` closes sessions; callers own
 commit/rollback decisions. Never commit `.env` or credential values.
 
 The schema is intended for one brokerage account. Family dashboard viewers are
-not brokerage accounts. Credentials store only an encrypted token; encryption
-and brokerage API calls are not implemented.
+not brokerage accounts. Credentials store only an encrypted access token. Brokerage access is read-only.
 
 Money uses `Numeric(20, 4)` and percentages use `Numeric(12, 6)`. Quantities are
 integers. Timestamps carry timezone information. `updated_at` changes on
@@ -89,16 +88,24 @@ curl http://127.0.0.1:8000/portfolio/holdings
 ```
 
 Funds are fetched live from equity margins. Holdings are read from PostgreSQL;
-explicit sync fetches holdings and atomically upserts returned rows and the
-account sync timestamp. Missing symbols are retained, including after an empty
-provider response; these rows may be stale. There is no deletion/reconciliation
-or scheduler yet. Values use the requested `quantity` formula; `t1_quantity`
+explicit sync validates the complete successful provider response, atomically
+upserts returned account/exchange/symbol identities as active, marks absent
+identities inactive, and updates the account sync timestamp. Missing identities
+remain stored and can be reactivated by a later sync, including after a complete
+empty response. Failed, malformed, duplicate or unauthenticated responses do not
+change membership; persistence failures roll back every write. Sync and snapshot
+creation share a per-account row lock. Current views use only active holdings;
+historical snapshots are retained. There is no scheduler yet. Values use the requested `quantity` formula; `t1_quantity`
 is stored separately and is not added to valuations. Decimal response values
 serialize as strings; stored money rounds to four decimal places and percentages
 to six. A zero-cost holding has zero percentage P&L.
 
-Bucket mappings live in `integrations/zerodha/buckets.py` (`SYMBOL_BUCKETS`): `NIFTYBEES` maps to `NIFTY_50`,
-`MIDCAPETF` to `MID_CAP`, and unknown symbols to `OTHER`.
+Authoritative definitions live in `integrations/zerodha/buckets.py` (`REGISTRY`).
+`classify_instrument(symbol, exchange, instrument_token)` is shared by holdings
+and execution persistence and current execution/contribution reporting. NIFTYBEES
+maps to NIFTY_50, MIDCAPETF to MID_CAP, HDFCSML250 to SMALL_CAP. Explicitly reviewed
+legacy individual stocks are OTHER. Unknown identities become UNCLASSIFIED;
+financial value is retained and reported separately, never silently folded into OTHER.
 
 This integration has no order placement, modification, cancellation, selling,
 positions, or derivatives operations. Local sync writes only our database.
@@ -134,9 +141,12 @@ cash of -1123.50 with live balance/net of 5099.50 yields available cash 5099.50.
   value is not positive. Percentage output rounds to six decimal places.
 - Allocation gives market values for all five buckets and sums to market value.
 
-Classification is explicit in `SYMBOL_BUCKETS`. Individual equities stay `OTHER`.
-Add the chosen small-cap ETF with `Bucket.SMALL_CAP` in that mapping when decided;
-no symbol is guessed. Existing stored classifications are read as stored and are
+Classification is explicit in the version-controlled instrument registry. Each
+reviewed definition has symbol, exchange aliases, optional known tokens, display
+name, bucket and source. Duplicate aliases/tokens fail at import/startup. No name
+heuristics infer market cap. Tokens may be reused by providers, so known-token
+matches also require matching reviewed symbol/exchange metadata. Add a reviewed
+instrument in one central location; no frontend classification rules exist. Existing stored classifications are read as stored and are
 not retroactively rewritten by summary/snapshot requests. Prices are never
 adjusted based on assumptions about corporate actions or unusually large P&L.
 
@@ -165,8 +175,7 @@ cannot reconstruct dates before snapshot collection started.
 
 `GET /portfolio/monthly-target` defaults to the current month in Asia/Kolkata.
 Use `?month=2026-10` for a specific month. Dates normalize to the month's first day;
-a missing target returns HTTP 404. No investment-progress claim is made because
-reliable persisted trade history is not populated yet.
+a missing target returns HTTP 404. Recorded delivery BUY executions are available separately; their historical coverage is explicitly incomplete.
 
 Seed/update the agreed October 2026 target explicitly with:
 
@@ -183,9 +192,46 @@ The [Personal API plan](https://support.zerodha.com/category/trading-and-markets
 does not include historical or real-time market data feeds. This implementation
 uses account funds/holdings only, and does not fetch candles, fabricate market
 history, or infer daily returns from lifetime P&L. Price freshness is tied to the
-last explicit holdings sync. Missing provider holdings remain in current storage
-under the existing upsert-only sync policy and can consequently appear in summaries
-and snapshots until deliberate reconciliation is implemented.
+last explicit holdings sync. Missing provider holdings remain stored as inactive
+identities and are excluded from current holdings, summaries, allocation and new
+snapshots. Run `alembic upgrade head` before starting the updated application;
+migration `0002_holding_lifecycle` preserves existing holdings as active until
+the next successful complete sync reconciles their membership.
 
-The only POST routes update our own database (holdings sync and snapshot). There
+The only POST routes update our own database (holdings sync, snapshot and canonical refresh). There
 are no order creation, modification, cancellation, or selling operations.
+
+
+## Canonical dashboard refresh and recorded executions
+
+`POST /portfolio/refresh` validates the connected account/token, then fetches and validates complete holdings, current-day orders, actual trades and margins before writing. It holds the same account lock as holdings sync/snapshot creation and commits reconciliation, order/fill upserts, today's snapshot and `last_refresh_at` together. Failures roll back everything. `?if_stale=true` skips provider calls when the last full refresh is within five minutes on the current India date. Expiry returns normalized `reconnect_required`; other provider errors are sanitized.
+
+`GET /portfolio/activity/today` separates actual executions from order context. Multiple fills aggregate by order/instrument/side/product using weighted prices. Identity includes account, execution date, exchange, provider order ID and trade ID; conflicting immutable fill replays are rejected. Order `book_date` records the current book independently from an older AMO placement timestamp. All financial persistence uses Decimal/Numeric. Charges and net amounts remain null when unavailable.
+
+CNC BUY executions missing sufficient matching active holdings are `AWAITING_HOLDINGS`. Sufficient existing quantity is `HOLDING_PRESENT_UNCONFIRMED`: it cannot prove attribution to today's purchase. Daily purchases offset by sells are `NETTED_BY_SELLS`. SELL/non-delivery activity is `NOT_APPLICABLE`. These events never increase holdings valuation or snapshots. Holdings valuation retains the existing quantity-only formula; t1 quantity is used only as an attribution clue.
+
+`GET /portfolio/contributions/month` sums only recorded CNC BUY fills in the current month. Orders, unfilled quantities, sells, intraday trades and unidentifiable legacy records do not count. `history_complete=false` and earliest recorded date disclose missing earlier history. No backfilled history, fabricated charges or monthly remaining/progress is supplied.
+
+`refresh_portfolio(db, if_stale=False)` is reusable by a future external scheduled job with a managed DB session. No scheduler or cron endpoint is added, and nothing is deployed. Day-only trade books require daily collection to build history. Keep local services bound to loopback until dashboard authentication and deployment access controls exist.
+
+Connection status adds local `token_valid`, backend `refresh_required` and `last_refresh_at`; early provider invalidation is detected on a read. Login's `return_to_dashboard=true` carries the return intent in encrypted callback state. Destination comes solely from backend `DASHBOARD_URL` (HTTPS in production, HTTP loopback allowed locally), with no credentials/query/fragment. The local default is `http://127.0.0.1:5173/`. Existing state cookie, TTL and exact callback validation remain enforced. Successful reconnect invalidates refresh freshness.
+
+Apply `0003_execution_activity` after `0002_holding_lifecycle`. It extends existing orders/transactions/account tables and preserves existing records. Downgrade refuses unknown null charges/net amounts through PostgreSQL's NOT NULL constraint instead of inventing values; plan a deliberate data migration before downgrading.
+
+Official order/trade semantics: [Kite orders documentation](https://kite.trade/docs/connect/v3/orders/).
+
+
+## Classification migration and corrections
+
+Apply `0004_classification` (file `0004_authoritative_classification.py`). It widens
+bucket columns/check constraints, changes new-row defaults to UNCLASSIFIED and
+adds nullable `portfolio_snapshots.unclassified_value`. Historical rows are not
+rewritten: null means that allocation was not separately recorded. New snapshots
+store unclassified value separately from Other, while totals still include it.
+Holdings allocation uses classifications materialized by the authoritative sync.
+Actual activity and monthly contribution reads resolve recorded instrument
+identity through the same registry, so registry corrections apply to current
+reporting. Canonical refresh corrects only the derived bucket on repeated fills;
+immutable execution facts/identity and prior snapshots remain unchanged.
+Downgrade refuses loss of nonzero unclassified snapshot allocation or any
+UNCLASSIFIED bucket rather than silently changing it into Other.

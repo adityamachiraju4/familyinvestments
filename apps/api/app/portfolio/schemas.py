@@ -32,6 +32,7 @@ class SnapshotView(BaseModel):
     midcap_value: Decimal
     smallcap_value: Decimal
     other_value: Decimal
+    unclassified_value: Decimal | None
 
 
 class HoldingHistoryView(BaseModel):

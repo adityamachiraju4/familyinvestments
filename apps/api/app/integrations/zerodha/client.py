@@ -87,3 +87,13 @@ class KiteClient:
         if not self._access_token:
             raise credentials_error()
         return self._request("GET", "/portfolio/holdings")
+
+    def get_orders(self):
+        if not self._access_token:
+            raise credentials_error()
+        return self._request("GET", "/orders")
+
+    def get_trades(self):
+        if not self._access_token:
+            raise credentials_error()
+        return self._request("GET", "/trades")

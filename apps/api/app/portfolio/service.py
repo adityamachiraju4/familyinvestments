@@ -10,6 +10,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.integrations.zerodha import service as zerodha
+from app.integrations.zerodha.schemas import Funds
 from app.integrations.zerodha.exceptions import IntegrationError, credentials_error
 from app.models import Bucket, Holding, HoldingSnapshot, MonthlyTarget, PortfolioSnapshot, ZerodhaAccount
 from app.portfolio.schemas import PortfolioSummary
@@ -20,7 +21,7 @@ def today() -> date:
 
 
 def current_holdings(db: Session, account_id: int) -> list[Holding]:
-    return list(db.scalars(select(Holding).where(Holding.account_id == account_id).order_by(Holding.exchange, Holding.tradingsymbol)))
+    return list(db.scalars(select(Holding).where(Holding.account_id == account_id, Holding.is_active.is_(True)).order_by(Holding.exchange, Holding.tradingsymbol)))
 
 
 def calculate_summary(rows: list[Holding], available_cash: Decimal, last_sync_at: datetime | None) -> PortfolioSummary:
@@ -45,7 +46,7 @@ def summary(db: Session) -> PortfolioSummary:
     return calculate_summary(current_holdings(db, account.id), funds.available_cash, account.last_sync_at)
 
 
-def snapshot_today(db: Session) -> PortfolioSnapshot:
+def snapshot_today(db: Session, *, current_funds: Funds | None = None, commit: bool = True) -> PortfolioSnapshot:
     """One atomic account/day snapshot; repeated writes preserve row identity."""
     try:
         account = zerodha.single_account(db)
@@ -55,7 +56,7 @@ def snapshot_today(db: Session) -> PortfolioSnapshot:
         ).with_for_update().execution_options(populate_existing=True)).one()
         if account.connection_status != "connected":
             raise credentials_error()
-        funds = zerodha.funds(db)
+        funds = current_funds if current_funds is not None else zerodha.funds(db)
         rows = current_holdings(db, account.id)
         day = today()
         values = calculate_summary(rows, funds.available_cash, account.last_sync_at)
@@ -68,6 +69,7 @@ def snapshot_today(db: Session) -> PortfolioSnapshot:
             "total_account_value": values.total_account_value,
             "day_pnl": Decimal(0),  # Unknown; never equate daily P&L with lifetime P&L.
             "total_pnl": values.total_pnl, "total_pnl_percent": values.total_pnl_percent,
+            "unclassified_value": values.allocation[Bucket.UNCLASSIFIED],
             "nifty_value": values.allocation[Bucket.NIFTY_50],
             "midcap_value": values.allocation[Bucket.MID_CAP],
             "smallcap_value": values.allocation[Bucket.SMALL_CAP],
@@ -104,7 +106,8 @@ def snapshot_today(db: Session) -> PortfolioSnapshot:
         snapshot = db.scalars(select(PortfolioSnapshot).where(
             PortfolioSnapshot.account_id == account.id, PortfolioSnapshot.snapshot_date == day,
         ).execution_options(populate_existing=True)).one()
-        db.commit()
+        if commit:
+            db.commit()
         return snapshot
     except SQLAlchemyError:
         db.rollback()

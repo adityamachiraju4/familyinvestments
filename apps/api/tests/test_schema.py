@@ -39,7 +39,7 @@ UNIQUES = {
 }
 MONEY_FIELDS = {
     "holdings": "average_price last_price invested_value current_value unrealised_pnl unrealised_pnl_percent",
-    "portfolio_snapshots": "available_cash holdings_invested_value holdings_market_value portfolio_value total_account_value day_pnl total_pnl total_pnl_percent nifty_value midcap_value smallcap_value other_value",
+    "portfolio_snapshots": "available_cash holdings_invested_value holdings_market_value portfolio_value total_account_value day_pnl total_pnl total_pnl_percent nifty_value midcap_value smallcap_value other_value unclassified_value",
     "holding_snapshots": "average_price last_price invested_value market_value pnl pnl_percent",
     "orders": "price average_price",
     "monthly_targets": "total_target nifty_target midcap_target smallcap_target",
@@ -87,7 +87,7 @@ def test_decimal_money_columns(table, fields):
 def test_buckets_are_constrained(name):
     table = Base.metadata.tables[name]
     enum = table.c.bucket.type
-    assert set(enum.enums) == {"NIFTY_50", "MID_CAP", "SMALL_CAP", "LARGE_CAP", "OTHER"}
+    assert set(enum.enums) == {bucket.value for bucket in Bucket}
     assert enum.validate_strings
     with pytest.raises(LookupError):
         enum.bind_processor(postgresql.dialect())("INVALID")
@@ -182,14 +182,54 @@ def test_frozen_migration_matches_model_metadata(monkeypatch):
     revision = load_revision()
     monkeypatch.setattr(revision, "op", operations)
     revision.upgrade()
+    # Frozen revisions together must match the current model, without editing 0001.
+    lifecycle_spec = importlib.util.spec_from_file_location(
+        "holding_lifecycle", API_ROOT / "alembic/versions/0002_holding_lifecycle.py",
+    )
+    lifecycle = importlib.util.module_from_spec(lifecycle_spec)
+    lifecycle_spec.loader.exec_module(lifecycle)
+    monkeypatch.setattr(operations, "add_column", lambda table, column: metadata.tables[table].append_column(column))
+    monkeypatch.setattr(lifecycle, "op", operations)
+    lifecycle.upgrade()
+    spec = importlib.util.spec_from_file_location("execution_activity", API_ROOT / "alembic/versions/0003_execution_activity.py")
+    executions = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(executions)
+    def alter_column(table, column, **kwargs):
+        col = metadata.tables[table].c[column]
+        if "nullable" in kwargs:
+            col.nullable = kwargs["nullable"]
+        if "type_" in kwargs:
+            col.type = kwargs["type_"]
+        if "server_default" in kwargs:
+            from sqlalchemy import DefaultClause
+            col.server_default = DefaultClause(kwargs["server_default"])
+    def unique(name, table, columns):
+        metadata.tables[table].append_constraint(UniqueConstraint(*columns, name=name))
+    monkeypatch.setattr(operations, "alter_column", alter_column)
+    monkeypatch.setattr(operations, "create_unique_constraint", unique)
+    monkeypatch.setattr(executions, "op", operations)
+    executions.upgrade()
+    spec = importlib.util.spec_from_file_location("classification", API_ROOT / "alembic/versions/0004_authoritative_classification.py")
+    classification = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(classification)
+    def drop_constraint(name, table, **kwargs):
+        target = metadata.tables[table]
+        target.constraints.remove(next(c for c in target.constraints if c.name == name))
+    def check(name, table, condition):
+        from sqlalchemy import CheckConstraint
+        metadata.tables[table].append_constraint(CheckConstraint(condition, name=name))
+    monkeypatch.setattr(operations, "drop_constraint", drop_constraint)
+    monkeypatch.setattr(operations, "create_check_constraint", check)
+    monkeypatch.setattr(classification, "op", operations)
+    classification.upgrade()
     assert set(metadata.tables) == TABLES
     dialect = postgresql.dialect()
     for name in TABLES:
         actual = metadata.tables[name]
         expected = Base.metadata.tables[name]
-        assert [str(CreateColumn(c).compile(dialect=dialect)) for c in actual.columns] == [
-            str(CreateColumn(c).compile(dialect=dialect)) for c in expected.columns
-        ]
+        assert {c.name: str(CreateColumn(c).compile(dialect=dialect)) for c in actual.columns} == {
+            c.name: str(CreateColumn(c).compile(dialect=dialect)) for c in expected.columns
+        }
         # Constraint ordering is arbitrary; compare their PostgreSQL definitions.
         def constraints(table):
             ddl = str(CreateTable(table).compile(dialect=dialect))
@@ -210,10 +250,12 @@ def test_alembic_offline_upgrade_and_downgrade(monkeypatch):
     for table in TABLES:
         assert f"CREATE TABLE {table}" in sql
     for table in ("holdings", "holding_snapshots", "investment_transactions"):
-        assert sql.count(f"CONSTRAINT ck_{table}_bucket CHECK") == 1
+        assert sql.count(f"CONSTRAINT ck_{table}_bucket CHECK") == 2
     assert "CREATE INDEX ix_holding_snapshots_account_date" in sql
+    assert "ALTER TABLE holdings ADD COLUMN is_active BOOLEAN DEFAULT true NOT NULL" in sql
     output.seek(0)
     output.truncate()
     command.downgrade(config, "head:base", sql=True)
+    assert "ALTER TABLE holdings DROP COLUMN is_active" in output.getvalue()
     for table in TABLES:
         assert f"DROP TABLE {table}" in output.getvalue()

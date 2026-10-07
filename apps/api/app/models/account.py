@@ -18,6 +18,7 @@ class ZerodhaAccount(Timestamps, Base):
     connection_status: Mapped[str] = mapped_column(String(32), default="disconnected", server_default="disconnected")
     last_authenticated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_sync_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_refresh_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class ZerodhaCredential(Timestamps, Base):

@@ -49,3 +49,6 @@ class ConnectionStatus(BaseModel):
     last_authenticated_at: datetime | None
     last_sync_at: datetime | None
     credentials_present: bool
+    token_valid: bool = False
+    refresh_required: bool = True
+    last_refresh_at: datetime | None = None

@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     APP_NAME: str = "Family Investments API"
     APP_ENV: str = "development"
     DEBUG: bool = True
+    DASHBOARD_URL: str | None = None
     DATABASE_URL: str | None = None
     ZERODHA_API_KEY: str | None = None
     ZERODHA_API_SECRET: SecretStr | None = None

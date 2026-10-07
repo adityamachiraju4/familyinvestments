@@ -16,6 +16,7 @@ class Bucket(StrEnum):
     SMALL_CAP = "SMALL_CAP"
     LARGE_CAP = "LARGE_CAP"
     OTHER = "OTHER"
+    UNCLASSIFIED = "UNCLASSIFIED"
 
 
 BUCKET = Enum(Bucket, name="bucket", native_enum=False, create_constraint=True, validate_strings=True)

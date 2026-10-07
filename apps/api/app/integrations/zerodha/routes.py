@@ -2,12 +2,15 @@
 
 from collections.abc import Generator
 import hmac
+import json
+from datetime import datetime, timezone
 import logging
 import re
 import secrets
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
@@ -49,10 +52,26 @@ def integration_db() -> Generator[Session, None, None]:
         raise IntegrationError("database_unavailable", "Database operation failed") from None
 
 
+def dashboard_url() -> str:
+    """Only server configuration controls the callback destination; never a URL parameter."""
+    value = settings.DASHBOARD_URL or ("http://127.0.0.1:5173/" if settings.APP_ENV == "development" else "")
+    try:
+        url = urlsplit(value)
+        url.port
+        if (not url.hostname or url.username or url.password or url.query or url.fragment
+                or (url.scheme != "https" and not (url.scheme == "http" and url.hostname in {"localhost", "127.0.0.1", "::1"}))):
+            raise ValueError
+    except ValueError:
+        raise IntegrationError("configuration_missing", "Dashboard return URL is not configured") from None
+    return value
+
+
 @router.get("/integrations/zerodha/login")
-def login(response: Response) -> dict[str, str]:
+def login(response: Response, return_to_dashboard: bool = False) -> dict[str, str]:
     require_config()
-    state = encrypt_token(secrets.token_urlsafe(32))
+    if return_to_dashboard:
+        dashboard_url()  # Validate the configured destination before starting login.
+    state = encrypt_token(json.dumps({"nonce": secrets.token_urlsafe(32), "dashboard": return_to_dashboard}))
     response.set_cookie(
         COOKIE, state, max_age=600, httponly=True, samesite="lax",
         secure=urlsplit(settings.ZERODHA_REDIRECT_URL).scheme == "https",
@@ -63,7 +82,7 @@ def login(response: Response) -> dict[str, str]:
 
 
 @router.get("/integrations/zerodha/callback")
-def callback(request: Request, response: Response, db: Session = Depends(integration_db)) -> dict[str, str]:
+def callback(request: Request, response: Response, db: Session = Depends(integration_db)):
     require_config()
     params = request.query_params
     request_token = params.get("request_token", "")
@@ -74,27 +93,37 @@ def callback(request: Request, response: Response, db: Session = Depends(integra
     if not state or not cookie or len(state) > 2048 or len(cookie) > 2048 or not hmac.compare_digest(state.encode(), cookie.encode()):
         raise IntegrationError("callback_invalid", "Start Zerodha login in this browser before authenticating", 400)
     try:
-        decrypt_token(state, ttl=600)
-    except IntegrationError:
+        state_data = json.loads(decrypt_token(state, ttl=600))
+    except (IntegrationError, ValueError):
         raise IntegrationError("callback_invalid", "Zerodha login has expired; start again", 400) from None
     configured = urlsplit(settings.ZERODHA_REDIRECT_URL)
     actual = urlsplit(str(request.url))
     if (actual.scheme, actual.netloc, actual.path) != (configured.scheme, configured.netloc, configured.path):
         raise IntegrationError("callback_invalid", "Callback URL does not match the configured redirect URL", 400)
     service.connect(db, request_token)
+    if isinstance(state_data, dict) and state_data.get("dashboard") is True:
+        response = RedirectResponse(dashboard_url(), status_code=303)
     response.delete_cookie(COOKIE, path="/integrations/zerodha/callback")
     response.headers["Cache-Control"] = "no-store"
     response.headers["Referrer-Policy"] = "no-referrer"
-    return {"status": "connected"}
+    return response if isinstance(response, RedirectResponse) else {"status": "connected"}
 
 
 @router.get("/integrations/zerodha/status", response_model=ConnectionStatus)
 def status(db: Session = Depends(integration_db)) -> ConnectionStatus:
     account = service.single_account(db)
+    from app.portfolio.activity import refresh_required
+    stored = service.credential(db, account)
+    expires = stored.token_expires_at if stored else None
+    if expires is not None and expires.tzinfo is None:
+        expires = expires.replace(tzinfo=timezone.utc)
+    valid = bool(stored and expires > datetime.now(timezone.utc) and account.connection_status == "connected")
     return ConnectionStatus(
-        connection_status=account.connection_status,
+        connection_status=("expired" if stored and not valid else account.connection_status),
         last_authenticated_at=account.last_authenticated_at, last_sync_at=account.last_sync_at,
-        credentials_present=service.credential(db, account) is not None,
+        credentials_present=stored is not None,
+        token_valid=valid, refresh_required=refresh_required(account.last_refresh_at),
+        last_refresh_at=account.last_refresh_at,
     )
 
 
@@ -111,5 +140,5 @@ def sync(db: Session = Depends(integration_db)) -> dict:
 @router.get("/portfolio/holdings", response_model=list[HoldingView])
 def holdings(db: Session = Depends(integration_db)) -> list[HoldingView]:
     account = service.single_account(db)
-    rows = db.scalars(select(Holding).where(Holding.account_id == account.id).order_by(Holding.exchange, Holding.tradingsymbol)).all()
+    rows = db.scalars(select(Holding).where(Holding.account_id == account.id, Holding.is_active.is_(True)).order_by(Holding.exchange, Holding.tradingsymbol)).all()
     return [HoldingView.model_validate(row) for row in rows]
