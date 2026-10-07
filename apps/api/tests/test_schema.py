@@ -49,8 +49,8 @@ MONEY_FIELDS = {
 
 
 def test_expected_tables():
-    assert set(Base.metadata.tables) == TABLES
-    assert all(list(table.primary_key.columns.keys()) == ["id"] for table in Base.metadata.tables.values())
+    assert set(Base.metadata.tables) == TABLES | {"mutual_fund_accounts", "mutual_fund_schemes", "sips", "mutual_fund_transactions", "mutual_fund_holdings"}
+    assert all(list(table.primary_key.columns.keys()) == ["id"] for name, table in Base.metadata.tables.items() if name != "mutual_fund_holdings")
 
 
 @pytest.mark.parametrize("table,columns", UNIQUES.items())

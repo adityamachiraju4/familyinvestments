@@ -7,6 +7,22 @@ export function RecordedContributions({ revision }: { revision: number }) {
   const query = useQuery(api.contributions, revision);
   return (
     <Card title="Recorded purchases this month">
+      {query.data && (
+        <div className="plan-row">
+          <span>
+            This month’s investments: Zerodha delivery BUYs{" "}
+            {money(query.data.recorded_buy_amount)} · MF purchases/SIPs{" "}
+            {money(query.data.monthly_mf_contributions ?? "0")}
+          </span>
+          <strong>
+            Total{" "}
+            {money(
+              query.data.total_recorded_invested ??
+                query.data.recorded_buy_amount,
+            )}
+          </strong>
+        </div>
+      )}
       {query.loading || query.error ? (
         <State loading={query.loading} error={query.error} />
       ) : query.data?.recorded_from ? (
@@ -18,8 +34,13 @@ export function RecordedContributions({ revision }: { revision: number }) {
           {Object.entries(query.data.allocation)
             .filter(
               ([key, value]) =>
-                ["NIFTY_50", "MID_CAP", "SMALL_CAP", "OTHER", "UNCLASSIFIED"].includes(key) ||
-                Number(value) > 0,
+                [
+                  "NIFTY_50",
+                  "MID_CAP",
+                  "SMALL_CAP",
+                  "OTHER",
+                  "UNCLASSIFIED",
+                ].includes(key) || Number(value) > 0,
             )
             .map(([bucket, value]) => (
               <div className="plan-row" key={bucket}>
@@ -28,7 +49,10 @@ export function RecordedContributions({ revision }: { revision: number }) {
               </div>
             ))}
           {Number(query.data.allocation.UNCLASSIFIED) > 0 && (
-            <p role="status" className="note">Some recorded investments are not yet classified into the monthly plan.</p>
+            <p role="status" className="note">
+              Some recorded investments are not yet classified into the monthly
+              plan.
+            </p>
           )}
           <p className="muted">
             Recorded history from {dateLabel(query.data.recorded_from)}.

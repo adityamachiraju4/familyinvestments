@@ -1,3 +1,4 @@
+import { SIPPlanning } from "../components/SIPPlanning";
 import { RecordedContributions } from "../components/RecordedContributions";
 import { api } from "../api/client";
 import { useQuery } from "../hooks/useQuery";
@@ -25,6 +26,7 @@ export default function Investments({ revision }: { revision: number }) {
         <State empty="No monthly target available." />
       )}
       <RecordedContributions revision={revision} />
+      <SIPPlanning revision={revision} />
       <Card title="A plan for the long term">
         <p className="muted">
           Your plan sits alongside recorded Zerodha delivery purchases. Complete

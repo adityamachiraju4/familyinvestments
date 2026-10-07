@@ -235,5 +235,8 @@ def contributions(db: Session) -> ContributionsView:
     allocation = {bucket: Decimal(0) for bucket in Bucket}
     for row in rows:
         allocation[classify_instrument(row.tradingsymbol, row.exchange, row.instrument_token)] += row.gross_amount
-    return ContributionsView(month=month, recorded_from=earliest,
+    from app.investments.service import monthly_contributions
+    mf_amount = monthly_contributions(db)
+    return ContributionsView(month=month, recorded_from=earliest, monthly_mf_contributions=mf_amount,
+                             total_recorded_invested=sum(allocation.values(), Decimal(0)) + mf_amount,
                              recorded_buy_amount=sum(allocation.values(), Decimal(0)), allocation=allocation)

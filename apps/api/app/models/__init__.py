@@ -13,3 +13,5 @@ __all__ = [
     "Bucket", "Holding", "HoldingSnapshot", "InvestmentTransaction",
     "MonthlyTarget", "Order", "PortfolioSnapshot", "ZerodhaAccount", "ZerodhaCredential",
 ]
+
+from app.models.mutual_fund import MutualFundAccount, MutualFundScheme, SIP, MutualFundTransaction, MutualFundHolding

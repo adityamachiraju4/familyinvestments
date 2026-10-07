@@ -42,7 +42,7 @@ configure_cors(app, settings)
 @app.middleware("http")
 async def private_cache_policy(request, call_next):
     response = await call_next(request)
-    if request.url.path.startswith(("/auth/", "/portfolio/", "/integrations/zerodha/")):
+    if request.url.path.startswith(("/auth/", "/portfolio/", "/investments/", "/integrations/zerodha/")):
         response.headers["Cache-Control"] = "no-store"
         response.headers["Referrer-Policy"] = "no-referrer"
     return response
@@ -91,3 +91,6 @@ app.include_router(zerodha_router, dependencies=[Depends(require_access)])
 app.include_router(callback_router)
 
 app.include_router(portfolio_router, dependencies=[Depends(require_access)])
+
+from app.investments.routes import router as investments_router
+app.include_router(investments_router, dependencies=[Depends(require_access)])

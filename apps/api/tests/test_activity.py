@@ -53,6 +53,9 @@ def db(monkeypatch):
         connection.execute('PRAGMA foreign_keys=ON')
     for model in (ZerodhaAccount, ZerodhaCredential, Holding, Order, InvestmentTransaction, PortfolioSnapshot, HoldingSnapshot):
         model.__table__.create(engine)
+    from app.models.mutual_fund import MutualFundAccount, MutualFundScheme, SIP, MutualFundTransaction, MutualFundHolding
+    for model in (MutualFundAccount, MutualFundScheme, SIP, MutualFundTransaction, MutualFundHolding):
+        model.__table__.create(engine)
     monkeypatch.setattr(portfolio, 'today', lambda: DAY)
     with sessionmaker(engine, expire_on_commit=False)() as session:
         session.add(ZerodhaAccount(id=42, client_id='LOCAL_DEV', display_name='Family', connection_status='connected'))

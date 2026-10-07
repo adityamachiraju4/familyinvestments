@@ -61,7 +61,7 @@ def test_health_public(auth,monkeypatch):
     assert client.get('/auth/session').json()['authenticated'] is False
 
 
-@pytest.mark.parametrize('path,method',[('/portfolio/holdings','GET'),('/portfolio/summary','GET'),('/portfolio/activity/today','GET'),('/portfolio/refresh','POST'),('/integrations/zerodha/status','GET'),('/integrations/zerodha/login','GET'),('/integrations/zerodha/sync/holdings','POST')])
+@pytest.mark.parametrize('path,method',[('/investments/sips','GET'),('/investments/sips/projections','GET'),('/investments/mutual-funds/summary','GET'),('/portfolio/holdings','GET'),('/portfolio/summary','GET'),('/portfolio/activity/today','GET'),('/portfolio/refresh','POST'),('/integrations/zerodha/status','GET'),('/integrations/zerodha/login','GET'),('/integrations/zerodha/sync/holdings','POST')])
 def test_private_routes_reject_unauthenticated(auth,path,method):
     response=auth[0].request(method,path)
     assert response.status_code==401

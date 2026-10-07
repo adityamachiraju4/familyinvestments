@@ -101,6 +101,8 @@ export interface Activity {
   rejected_cancelled_count: number;
 }
 export interface Contributions {
+  monthly_mf_contributions?: string;
+  total_recorded_invested?: string;
   month: string;
   recorded_from: string | null;
   recorded_buy_amount: Decimal;

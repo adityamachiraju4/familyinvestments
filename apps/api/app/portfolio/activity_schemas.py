@@ -51,6 +51,8 @@ class ContributionsView(BaseModel):
     recorded_from: date | None
     recorded_buy_amount: Decimal
     allocation: dict[Bucket, Decimal]
+    monthly_mf_contributions: Decimal = Decimal(0)
+    total_recorded_invested: Decimal = Decimal(0)
     history_complete: bool = False
     charges: Decimal | None = None
 
