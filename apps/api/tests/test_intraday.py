@@ -241,3 +241,58 @@ def test_output_validation_errors_are_not_provider_failures(db,provider,monkeypa
         return original(**{**kwargs,'symbol':None})
     monkeypatch.setattr(intraday,'IntradayPosition',invalid_output)
     with pytest.raises(ValidationError):intraday.today_intraday(db)
+
+
+@pytest.mark.parametrize('value,expected', [
+    (Decimal('-3.8999999999999773'), Decimal('-3.9000')),
+    (Decimal('3.8999999999999773'), Decimal('3.9000')),
+    (0, Decimal('0.0000')), (17, Decimal('17.0000')),
+    (Decimal('1.23456789123456789123456789'), Decimal('1.2346')),
+])
+def test_provider_precision_accepted_and_pnl_normalized(db,provider,monkeypatch,value,expected):
+    positions(monkeypatch,provider,{**POSITION,'realised':value,'unrealised':value})
+    raw=intraday.ProviderPosition.model_validate({**POSITION,'realised':value})
+    assert raw.realised==Decimal(value)
+    response=call(db,'/portfolio/intraday/today')
+    assert response.status_code==200 and response.json()['positions_available'] is True
+    row=response.json()['positions'][0]
+    assert Decimal(row['realised_pnl'])==expected and Decimal(row['unrealised_pnl'])==expected
+
+
+def test_live_nykaa_position_precision_and_provider_backed_pnl(db,provider,monkeypatch):
+    live={**POSITION,'quantity':1,'buy_quantity':5,'sell_quantity':4,
+          'buy_price':Decimal('344.2'),'sell_price':344,'buy_value':1721,'sell_value':1376,
+          'realised':0,'unrealised':Decimal('-3.8999999999999773')}
+    positions(monkeypatch,provider,live)
+    response=call(db,'/portfolio/intraday/today')
+    assert response.status_code==200 and response.json()['positions_available'] is True
+    row=response.json()['positions'][0]
+    assert (row['product'],row['buy_quantity'],row['sell_quantity'],row['open_quantity'],row['status'])==('MIS',5,4,1,'OPEN')
+    assert Decimal(row['buy_value'])==1721 and Decimal(row['sell_value'])==1376
+    # Preserve provider realised zero; do not substitute a buy/sell spread estimate.
+    assert Decimal(row['realised_pnl'])==0 and Decimal(row['unrealised_pnl'])==Decimal('-3.9000')
+    assert row['source']=='provider_positions'
+
+
+@pytest.mark.parametrize('field',['realised','unrealised','buy_price','sell_price','buy_value','sell_value'])
+@pytest.mark.parametrize('value',['NaN','Infinity','-Infinity','not-a-number','1e100','1e16',{}])
+def test_invalid_numeric_provider_values_rejected_with_safe_fallback(db,provider,monkeypatch,field,value):
+    from pydantic import ValidationError
+    payload={**POSITION,field:value}
+    with pytest.raises(ValidationError):intraday.ProviderPosition.model_validate(payload)
+    positions(monkeypatch,provider,payload)
+    response=call(db,'/portfolio/intraday/today')
+    assert response.status_code==200 and response.json()['positions_available'] is False
+    assert response.json()['positions']==[]
+
+
+def test_provider_turnover_precision_is_preserved():
+    precise=Decimal('1721.123456789123456789')
+    row=intraday.ProviderPosition.model_validate({**POSITION,'buy_value':precise,'buy_price':precise})
+    assert row.buy_value==precise and row.buy_price==precise
+
+
+def test_negative_absurd_pnl_rejected():
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        intraday.ProviderPosition.model_validate({**POSITION,'unrealised':Decimal('-1e16')})

@@ -1,7 +1,7 @@
 """Read-only MIS positions; never infer P&L from unmatched executions."""
 from collections import defaultdict
 from datetime import date, datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, ROUND_HALF_UP, localcontext
 from typing import Literal
 from pydantic import BaseModel, Field, StrictInt, ValidationError
 from sqlalchemy import select
@@ -10,8 +10,20 @@ from app.integrations.zerodha import service as zerodha
 from app.integrations.zerodha.exceptions import IntegrationError, provider_error
 from app.portfolio import service
 
-Amount = Field(ge=0, allow_inf_nan=False, max_digits=20, decimal_places=8)
-PnL = Field(default=None, allow_inf_nan=False, max_digits=20, decimal_places=8)
+# Bound magnitude, not provider fractional precision: Kite decimals may contain
+# floating-point noise. Preserve turnover/prices; normalize only displayed P&L.
+LIMIT = Decimal("1e16")
+Amount = Field(ge=0, lt=LIMIT, allow_inf_nan=False)
+PnL = Field(default=None, gt=-LIMIT, lt=LIMIT, allow_inf_nan=False)
+
+
+def display_pnl(value: Decimal | None) -> Decimal | None:
+    if value is None:
+        return None
+    # Project-standard money precision, independent of ambient Decimal context.
+    with localcontext() as context:
+        context.prec = 28
+        return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 
 class ProviderPosition(BaseModel):
@@ -98,8 +110,8 @@ def today_intraday(db):
             open_quantity=quantity,average_buy_price=row.buy_price if row.buy_quantity else None,
             average_sell_price=row.sell_price if row.sell_quantity else None,
             buy_value=row.buy_value,sell_value=row.sell_value,
-            realised_pnl=net.realised if trusted else None,
-            unrealised_pnl=net.unrealised if trusted else None,
+            realised_pnl=display_pnl(net.realised) if trusted else None,
+            unrealised_pnl=display_pnl(net.unrealised) if trusted else None,
             status='UNCONFIRMED' if quantity is None else 'CLOSED' if quantity == 0 else 'OPEN',
             source='provider_positions',fill_count=len(groups[key])))
     return IntradayView(date=day,observed_at=datetime.now(timezone.utc),positions_available=True,positions=result)
