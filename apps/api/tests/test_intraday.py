@@ -83,9 +83,12 @@ def test_position_credential_failure_requires_reconnect(db,provider,monkeypatch)
 
 
 @pytest.mark.parametrize('change',[{'realised':'NaN'},{'buy_quantity':-1}])
-def test_invalid_position_data_rejected(db,provider,monkeypatch,change):
+def test_invalid_position_data_uses_empty_fallback(db,provider,monkeypatch,change):
     positions(monkeypatch,provider,{**POSITION,**change})
-    assert call(db,'/portfolio/intraday/today').status_code==502
+    response=call(db,'/portfolio/intraday/today')
+    assert response.status_code==200
+    assert response.json()['positions_available'] is False
+    assert response.json()['positions']==[]
 
 
 def test_registry_changes_current_classification_without_financial_mutation(db,provider,monkeypatch):
@@ -166,3 +169,75 @@ def test_legacy_classifications_flow_through_current_views_without_rewriting_his
     assert (old_snapshot.unclassified_value,old_snapshot.other_value,old_snapshot.midcap_value)==original_values
     current=db.scalars(select(HoldingSnapshot).where(HoldingSnapshot.snapshot_date==DAY)).all()
     assert all(row.bucket not in {Bucket.OTHER,Bucket.UNCLASSIFIED} for row in current)
+
+
+@pytest.mark.parametrize('payload', [
+    None, [], {}, {'net': [], 'day': [{}]}, {'net': {}, 'day': []}, {'net': [], 'day': [None]},
+    {'net': [], 'day': [{**POSITION, 'realised': 'NaN'}]},
+    {'net': [{**POSITION, 'buy_quantity': -1}], 'day': []},
+    {'net': [POSITION, POSITION], 'day': []},
+])
+@pytest.mark.parametrize('with_fills', [True, False])
+def test_provider_parsing_failures_return_200_fallback(db,provider,monkeypatch,payload,with_fills):
+    if with_fills:
+        mis_fills(provider);activity.refresh_portfolio(db)
+    monkeypatch.setattr(provider,'get_positions',lambda:payload,raising=False)
+    response=call(db,'/portfolio/intraday/today')
+    assert response.status_code==200
+    view=response.json()
+    assert view['positions_available'] is False and view['observed_at'] is None
+    assert len(view['positions'])==(1 if with_fills else 0)
+    if with_fills:
+        row=view['positions'][0]
+        assert row['source']=='recorded_fills' and row['status']=='UNCONFIRMED'
+        assert (row['buy_quantity'],row['sell_quantity'],row['open_quantity'])==(5,3,2)
+        assert Decimal(row['buy_value'])==500 and Decimal(row['sell_value'])==330
+        assert row['realised_pnl'] is None and row['unrealised_pnl'] is None
+
+
+@pytest.mark.parametrize('with_fills',[True,False])
+def test_kite_provider_error_returns_200_fallback(db,provider,monkeypatch,with_fills):
+    if with_fills:
+        mis_fills(provider);activity.refresh_portfolio(db)
+    def fail():raise provider_error()
+    monkeypatch.setattr(provider,'get_positions',fail,raising=False)
+    response=call(db,'/portfolio/intraday/today')
+    assert response.status_code==200 and response.json()['positions_available'] is False
+    assert len(response.json()['positions'])==(1 if with_fills else 0)
+
+
+@pytest.mark.parametrize('failure_point',['fills','client'])
+def test_database_errors_are_not_swallowed(db,provider,monkeypatch,failure_point):
+    from sqlalchemy.exc import OperationalError
+    from app.integrations.zerodha import service as zerodha
+    error=OperationalError(None,None,Exception('test database failure'))
+    def fail(*args,**kwargs):raise error
+    if failure_point=='fills':monkeypatch.setattr(db,'scalars',fail)
+    else:monkeypatch.setattr(zerodha,'authenticated_client',fail)
+    with pytest.raises(OperationalError):intraday.today_intraday(db)
+
+
+@pytest.mark.parametrize('code',['database_unavailable','configuration_missing','dashboard_auth_required'])
+def test_other_integration_errors_propagate(db,provider,monkeypatch,code):
+    from app.integrations.zerodha.exceptions import IntegrationError
+    error=IntegrationError(code,'Safe test failure')
+    def fail():raise error
+    monkeypatch.setattr(provider,'get_positions',fail,raising=False)
+    with pytest.raises(IntegrationError) as raised:intraday.today_intraday(db)
+    assert raised.value is error
+
+
+def test_unrelated_programming_error_propagates(db,provider,monkeypatch):
+    def fail():raise TypeError('programming error')
+    monkeypatch.setattr(provider,'get_positions',fail,raising=False)
+    with pytest.raises(TypeError):intraday.today_intraday(db)
+
+
+def test_output_validation_errors_are_not_provider_failures(db,provider,monkeypatch):
+    from pydantic import ValidationError
+    positions(monkeypatch,provider)
+    original=intraday.IntradayPosition
+    def invalid_output(**kwargs):
+        return original(**{**kwargs,'symbol':None})
+    monkeypatch.setattr(intraday,'IntradayPosition',invalid_output)
+    with pytest.raises(ValidationError):intraday.today_intraday(db)
