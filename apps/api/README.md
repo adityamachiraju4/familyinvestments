@@ -62,12 +62,14 @@ source ../../.venv/bin/activate
 uvicorn app.main:app --reload --port 8000
 ```
 
-Open `http://127.0.0.1:8000/integrations/zerodha/login` in your browser. Follow
-its returned `login_url` in that same browser within ten minutes. The login
-response sets an HttpOnly state cookie; the callback verifies it and the
-registered callback location. Kite itself redirects to the registered URL;
-`redirect_params` carries the state and does not override that URL. Do not
-manually paste callback tokens into terminal commands or logs.
+After signing into the household dashboard, use **Connect Zerodha for today**.
+The authenticated frontend fetches the login URL with its dashboard CSRF token;
+follow the normal Kite browser flow within ten minutes. The login response sets
+an HttpOnly state cookie; the callback verifies it, the dashboard session binding
+and the registered callback location. Kite redirects to the registered URL;
+`redirect_params` carries state and does not override that URL. Do not manually
+paste callback tokens into terminal commands or logs. Direct unauthenticated
+login initiation is rejected.
 
 The callback exchanges the one-time request token using the documented SHA-256
 checksum, then stores only a Fernet-encrypted access token. On first login,
@@ -78,7 +80,9 @@ PIN, TOTP, API secret, or request token is persisted. Tokens expire at 06:00 IST
 on the next day; early provider invalidation also requires login again. A
 `connected` status records the last successful login, not a real-time token check.
 
-Read or synchronize with:
+The following financial endpoints require a dashboard session; POST requests
+also require the allowed Origin and X-CSRF-Token. Use the authenticated dashboard
+for normal operation. Endpoint examples (bare curl receives 401):
 
 ```bash
 curl http://127.0.0.1:8000/integrations/zerodha/status
@@ -109,8 +113,7 @@ financial value is retained and reported separately, never silently folded into 
 
 This integration has no order placement, modification, cancellation, selling,
 positions, or derivatives operations. Local sync writes only our database.
-Endpoints still have no application authentication; keep the API bound to
-loopback. Errors use fixed messages and omit provider bodies and connection
+Financial endpoints now require household dashboard authentication; keep local development bound to loopback. Errors use fixed messages and omit provider bodies and connection
 values. The callback query is redacted from Uvicorn access logs; any future
 proxy must also exclude callback query strings from logging. No automatic
 provider retries are made. Ordinary tests use mocked HTTP and isolated SQLite
@@ -212,7 +215,7 @@ CNC BUY executions missing sufficient matching active holdings are `AWAITING_HOL
 
 `GET /portfolio/contributions/month` sums only recorded CNC BUY fills in the current month. Orders, unfilled quantities, sells, intraday trades and unidentifiable legacy records do not count. `history_complete=false` and earliest recorded date disclose missing earlier history. No backfilled history, fabricated charges or monthly remaining/progress is supplied.
 
-`refresh_portfolio(db, if_stale=False)` is reusable by a future external scheduled job with a managed DB session. No scheduler or cron endpoint is added, and nothing is deployed. Day-only trade books require daily collection to build history. Keep local services bound to loopback until dashboard authentication and deployment access controls exist.
+`refresh_portfolio(db, if_stale=False)` is reusable by a future external scheduled job with a managed DB session. No scheduler or cron endpoint is added, and nothing is deployed. Day-only trade books require daily collection to build history. Keep local services bound to loopback; configure dashboard authentication before starting them.
 
 Connection status adds local `token_valid`, backend `refresh_required` and `last_refresh_at`; early provider invalidation is detected on a read. Login's `return_to_dashboard=true` carries the return intent in encrypted callback state. Destination comes solely from backend `DASHBOARD_URL` (HTTPS in production, HTTP loopback allowed locally), with no credentials/query/fragment. The local default is `http://127.0.0.1:5173/`. Existing state cookie, TTL and exact callback validation remain enforced. Successful reconnect invalidates refresh freshness.
 
@@ -300,9 +303,7 @@ frontend custom domains on the same site to preserve the existing SameSite=Lax
 login-state cookie; unrelated domains can block the frontend's credentialed login
 request. Check the callback in a real browser after eventual deployment.
 
-The backend currently has no dashboard authentication. CORS is a browser origin
-policy, not API access control: add an authenticated access boundary before making
-financial endpoints publicly accessible. Keep production access gated until then.
+Household session authentication protects financial endpoints. CORS remains a browser origin policy, not a substitute for authentication. Configure and verify the access boundary before public deployment.
 Railway/proxy log retention must also exclude callback query strings; application
 Uvicorn access logging already strips them. No settings/credentials are logged;
 SQLAlchemy hides bound parameters and production debug tracebacks are disabled.
@@ -312,3 +313,95 @@ References: [Railway config](https://docs.railway.com/config-as-code/reference),
 [monorepo roots](https://docs.railway.com/deployments/monorepo),
 [pre-deploy migrations](https://docs.railway.com/deployments/pre-deploy-command),
 [Uvicorn proxy trust](https://www.uvicorn.org/settings/).
+
+
+## Household dashboard authentication
+
+One household credential grants private dashboard access; Zerodha login separately
+connects the brokerage data source. No household user-management system or trading
+capability is introduced. There is no development bypass: missing/invalid auth
+configuration prevents application startup in every environment.
+
+Required backend variables (never `VITE_` variables): `DASHBOARD_USERNAME`,
+`DASHBOARD_PASSWORD_HASH`, `SESSION_SECRET`, and optionally `SESSION_TTL_SECONDS`
+(default 28800; range 300–86400). Keep `DATABASE_URL` configured. Generate the
+password hash interactively from `apps/api` with the existing virtual environment:
+
+```sh
+python -m scripts.hash_dashboard_password
+python -c 'import secrets; print(secrets.token_urlsafe(32))'
+```
+
+The first command prompts twice without echoing the password and prints only a
+salted scrypt hash. The second prints an independent random session secret. Save
+these values only in local gitignored `.env` or Railway secret variables. Do not
+paste plaintext passwords into shell commands, source, reports or logs. Hashing
+uses the existing cryptography package with scrypt N=131072, r=8, p=1 and a random
+16-byte salt; no additional hashing dependency is needed. Each verification needs
+approximately 128 MiB working memory, so provision a suitable Railway memory tier.
+
+Apply `alembic upgrade head` locally before starting the updated API; production
+uses the existing Railway pre-deploy command. Migration `0005_dashboard_auth`
+adds only `dashboard_sessions` and `dashboard_login_attempts`, preserving portfolio,
+trade, snapshot and brokerage credential tables. It has not been applied to the
+local database as part of this task. Configure local credentials yourself, then
+start the backend as documented and sign in through the dashboard. Use the same
+127.0.0.1 hostname for frontend/backend/callback. Frontend requires no auth secrets.
+
+API contracts:
+
+- `POST /auth/login`: JSON username/password, requires an allowed `Origin`.
+  Generic credential failure; no password/hash returned. A new authenticated
+  session rotates/revokes the previous browser session.
+- `GET /auth/session`: public normalized authenticated flag, and only for a valid
+  session its expiration and CSRF token. Responses are not cached.
+- `POST /auth/logout`: requires session, allowed Origin and `X-CSRF-Token`.
+  Deletes the server session and clears the cookie; replay is rejected.
+- `/health` and `/health/db` remain public. Existing development API documentation
+  is unchanged. Every portfolio and Zerodha route requires a dashboard session.
+
+Session cookies contain a random 256-bit opaque identifier and HMAC-SHA256
+signature. PostgreSQL stores only a hash of the identifier, credential-version
+fingerprint and absolute expiry. Password/username/session-secret rotation
+invalidates prior sessions. Expired sessions are rejected server-side and pruned
+on successful logins; there is no sliding refresh or localStorage bearer token.
+CSRF tokens returned only to authenticated frontend code remain in memory. All
+private POSTs and GET Zerodha login initiation require exact allowed Origin plus
+this token. Brokerage callback uses its existing encrypted nonce, HttpOnly state
+cookie, ten-minute TTL and exact callback URL checks, additionally bound to the
+same valid dashboard session. If the session expires or is revoked during the
+brokerage flow, sign in and restart the flow; callback validation is never bypassed.
+
+Production cookie: `__Host-dashboard_session`, HttpOnly, Secure, SameSite=None,
+Path=/, no Domain attribute. Development cookie: `dashboard_session`, HttpOnly,
+SameSite=Lax on HTTP loopback. Production CORS permits only `FRONTEND_ORIGIN`,
+credentials and the CSRF header. Use `fetch(credentials: include)` (already set).
+Different HTTPS origins work when browser cookie policy permits them; default
+Vercel and Railway domains are cross-site and third-party-cookie restrictions can
+block cookies despite correct CORS. **For reliable deployment use same-site custom
+origins, e.g. dashboard.example.com on Vercel and api.example.com on Railway.**
+This also preserves the existing SameSite=Lax Zerodha state cookie without changing
+brokerage auth semantics. No broad cookie domain is needed. Verify real browser
+login/logout/callback in the final topology before public access. The frontend
+checks that a successful login actually created a usable cookie and explains
+cookie blocking when it did not. Do not weaken CSRF or cookie security to fix it.
+
+Login windows persist in PostgreSQL and use row locks with consistent global/IP
+lock order, so limits apply across instances: at most 10 attempts per IP and 30
+for the household per 15-minute window, including successful attempts. Windows
+reset after expiration; 429 includes Retry-After. Keys are HMAC hashes; no submitted
+usernames, passwords, raw IPs or attempt event bodies are stored. A global window
+prevents rotating-IP bypass but can temporarily deny the household after hostile
+traffic. Verify trusted proxy addresses before using forwarded client IPs; never
+trust arbitrary X-Forwarded-For headers. No Redis/in-memory-only limiter is used.
+Expired attempt keys can be pruned operationally with a reviewed maintenance job
+once their windows have elapsed; no in-process scheduler is added.
+
+No secrets are logged. Login validation errors are sanitized so malformed bodies
+cannot echo passwords. Private responses carry no-store/no-referrer headers;
+callback query redaction remains. Production debug is off. Review infrastructure
+logs as well and preserve the existing callback query exclusion.
+
+References: [OWASP password storage](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html),
+[session management](https://cheatsheetseries.owasp.org/cheatsheets/Session_Management_Cheat_Sheet.html),
+[MDN third-party cookies](https://developer.mozilla.org/en-US/docs/Web/Privacy/Guides/Third-party_cookies).

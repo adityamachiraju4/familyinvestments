@@ -11,6 +11,8 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from app.models import Holding, HoldingSnapshot, InvestmentTransaction, Order, PortfolioSnapshot, ZerodhaAccount, ZerodhaCredential
 from app.main import app
+from app.auth.service import require_access
+from types import SimpleNamespace
 from app.integrations.zerodha import service as zerodha
 from app.integrations.zerodha.exceptions import credentials_error, provider_error, IntegrationError
 from app.integrations.zerodha.routes import integration_db
@@ -72,6 +74,7 @@ def count(db, model):
 
 def call(db, path, method='GET'):
     async def run():
+        app.dependency_overrides[require_access] = lambda: SimpleNamespace(token_hash="isolated-test-session")
         app.dependency_overrides[integration_db] = lambda: db
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:

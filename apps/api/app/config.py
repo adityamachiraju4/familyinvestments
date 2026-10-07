@@ -19,6 +19,10 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    DASHBOARD_USERNAME: str | None = None
+    DASHBOARD_PASSWORD_HASH: SecretStr | None = None
+    SESSION_SECRET: SecretStr | None = None
+    SESSION_TTL_SECONDS: int = 28800
     APP_NAME: str = "Family Investments API"
     APP_ENV: str = "development"
     DEBUG: bool = True

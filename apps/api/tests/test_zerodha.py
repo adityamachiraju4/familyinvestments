@@ -20,6 +20,8 @@ from sqlalchemy.pool import StaticPool
 from app import database
 from app.config import settings
 from app.main import app
+from app.auth.service import require_access
+from types import SimpleNamespace
 from app.models import Holding, ZerodhaAccount, ZerodhaCredential, Bucket
 from app.integrations.zerodha import crypto, service, client as client_module
 from app.integrations.zerodha.client import KiteClient
@@ -56,6 +58,7 @@ def db():
 
 def api_call(path, method='GET', db=None):
     async def run():
+        app.dependency_overrides[require_access] = lambda: SimpleNamespace(token_hash="isolated-test-session")
         if db is not None:
             app.dependency_overrides[integration_db] = lambda: db
         try:
@@ -105,6 +108,7 @@ def test_missing_config_fails_closed(monkeypatch, field):
 def callback_flow(db, monkeypatch, user_id='AB1234'):
     monkeypatch.setattr(KiteClient, 'exchange_token', lambda self, token: {'access_token': TOKEN, 'user_id': user_id})
     async def run():
+        app.dependency_overrides[require_access] = lambda: SimpleNamespace(token_hash="isolated-test-session")
         app.dependency_overrides[integration_db] = lambda: db
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1:8000') as client:
@@ -258,7 +262,7 @@ def test_routes_have_no_order_mutations():
     paths = app.openapi()['paths']
     assert '/portfolio/holdings' in paths and '/portfolio/funds' in paths
     assert not any(path.startswith('/orders') for path in paths)
-    assert {(path, method) for path, methods in paths.items() for method in methods if method in {'post', 'put', 'patch', 'delete'}} == {('/integrations/zerodha/sync/holdings', 'post'), ('/portfolio/snapshots/today', 'post'), ('/portfolio/refresh', 'post')}
+    assert {(path, method) for path, methods in paths.items() for method in methods if method in {'post', 'put', 'patch', 'delete'}} == {('/auth/login', 'post'), ('/auth/logout', 'post'), ('/integrations/zerodha/sync/holdings', 'post'), ('/portfolio/snapshots/today', 'post'), ('/portfolio/refresh', 'post')}
 
 @pytest.mark.parametrize('status,payload,code', [
     (401, {'message': TOKEN}, 'credentials_invalid'),
@@ -438,6 +442,7 @@ def test_dashboard_callback_redirect_keeps_state_security(db, monkeypatch):
     monkeypatch.setattr(settings, 'DASHBOARD_URL', 'http://127.0.0.1:5173/')
     monkeypatch.setattr(KiteClient, 'exchange_token', lambda self, token: {'access_token': TOKEN, 'user_id': 'AB1234'})
     async def run():
+        app.dependency_overrides[require_access] = lambda: SimpleNamespace(token_hash="isolated-test-session")
         app.dependency_overrides[integration_db] = lambda: db
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://127.0.0.1:8000') as client:
@@ -479,6 +484,7 @@ def test_production_callback_uses_configured_https_origin(db, monkeypatch):
     connected = MagicMock()
     monkeypatch.setattr(service, 'connect', connected)
     async def run():
+        app.dependency_overrides[require_access] = lambda: SimpleNamespace(token_hash="isolated-test-session")
         app.dependency_overrides[integration_db] = lambda: db
         try:
             async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://api.example.com') as client:

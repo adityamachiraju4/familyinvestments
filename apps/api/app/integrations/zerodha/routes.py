@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.auth.service import require_access
 from app import database
 from app.config import settings
 from app.integrations.zerodha.client import login_url, require_config
@@ -67,11 +68,11 @@ def dashboard_url() -> str:
 
 
 @router.get("/integrations/zerodha/login")
-def login(response: Response, return_to_dashboard: bool = False) -> dict[str, str]:
+def login(response: Response, return_to_dashboard: bool = False, session=Depends(require_access)) -> dict[str, str]:
     require_config()
     if return_to_dashboard:
         dashboard_url()  # Validate the configured destination before starting login.
-    state = encrypt_token(json.dumps({"nonce": secrets.token_urlsafe(32), "dashboard": return_to_dashboard}))
+    state = encrypt_token(json.dumps({"nonce": secrets.token_urlsafe(32), "dashboard": return_to_dashboard, "session": session.token_hash}))
     response.set_cookie(
         COOKIE, state, max_age=600, httponly=True, samesite="lax",
         secure=urlsplit(settings.ZERODHA_REDIRECT_URL).scheme == "https",
@@ -82,7 +83,7 @@ def login(response: Response, return_to_dashboard: bool = False) -> dict[str, st
 
 
 @router.get("/integrations/zerodha/callback")
-def callback(request: Request, response: Response, db: Session = Depends(integration_db)):
+def callback(request: Request, response: Response, db: Session = Depends(integration_db), session=Depends(require_access)):
     require_config()
     params = request.query_params
     request_token = params.get("request_token", "")
@@ -96,6 +97,8 @@ def callback(request: Request, response: Response, db: Session = Depends(integra
         state_data = json.loads(decrypt_token(state, ttl=600))
     except (IntegrationError, ValueError):
         raise IntegrationError("callback_invalid", "Zerodha login has expired; start again", 400) from None
+    if not isinstance(state_data, dict) or not hmac.compare_digest(str(state_data.get("session", "")), session.token_hash):
+        raise IntegrationError("callback_invalid", "Zerodha login belongs to a different dashboard session", 400)
     configured = urlsplit(settings.ZERODHA_REDIRECT_URL)
     actual = urlsplit(str(request.url))
     if (actual.scheme, actual.netloc, actual.path) != (configured.scheme, configured.netloc, configured.path):

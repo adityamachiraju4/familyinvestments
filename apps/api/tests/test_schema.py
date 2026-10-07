@@ -27,6 +27,7 @@ API_ROOT = Path(__file__).resolve().parents[1]
 TABLES = {
     "zerodha_accounts", "zerodha_credentials", "holdings", "portfolio_snapshots",
     "holding_snapshots", "orders", "monthly_targets", "investment_transactions",
+    "dashboard_sessions", "dashboard_login_attempts",
 }
 UNIQUES = {
     "zerodha_accounts": ("client_id",),
@@ -60,7 +61,7 @@ def test_unique_constraints(table, columns):
     }
 
 
-@pytest.mark.parametrize("name", sorted(TABLES - {"zerodha_accounts"}))
+@pytest.mark.parametrize("name", sorted(TABLES - {"zerodha_accounts", "dashboard_sessions", "dashboard_login_attempts"}))
 def test_account_foreign_keys(name):
     column = Base.metadata.tables[name].c.account_id
     assert not column.nullable
@@ -222,6 +223,11 @@ def test_frozen_migration_matches_model_metadata(monkeypatch):
     monkeypatch.setattr(operations, "create_check_constraint", check)
     monkeypatch.setattr(classification, "op", operations)
     classification.upgrade()
+    spec = importlib.util.spec_from_file_location("dashboard_auth", API_ROOT / "alembic/versions/0005_dashboard_auth.py")
+    auth = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(auth)
+    monkeypatch.setattr(auth, "op", operations)
+    auth.upgrade()
     assert set(metadata.tables) == TABLES
     dialect = postgresql.dialect()
     for name in TABLES:

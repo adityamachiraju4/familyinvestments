@@ -1,3 +1,5 @@
+import { dashboardAuth, clearSession, type DashboardSession } from "./api/auth";
+import { Login } from "./components/Login";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
 import { api, reconnect, refreshPortfolio } from "./api/client";
@@ -8,7 +10,8 @@ import Portfolio from "./pages/Portfolio";
 import HoldingDetail from "./pages/HoldingDetail";
 import Investments from "./pages/Investments";
 import History from "./pages/History";
-export default function App() {
+function DashboardShell({ onLogout }: { onLogout: () => Promise<void> }) {
+  const [logoutBusy, setLogoutBusy] = useState(false);
   const [revision, setRevision] = useState(0),
     [busy, setBusy] = useState(false),
     [message, setMessage] = useState("");
@@ -98,6 +101,11 @@ export default function App() {
         <header>
           <span className="header-title">Family Investments</span>
           <div className="header-actions">
+            <button className="refresh" disabled={logoutBusy} onClick={async () => {
+              setLogoutBusy(true);
+              try { await onLogout(); } catch { setMessage("Unable to sign out. Please try again."); }
+              finally { setLogoutBusy(false); }
+            }}>{logoutBusy ? "Signing out…" : "Sign out"}</button>
             <div className="connection">
               <span className={`dot ${connected ? "connected" : ""}`} />
               {status.loading
@@ -191,4 +199,28 @@ function LinkBrand() {
       </div>
     </div>
   );
+}
+
+
+export default function App() {
+  const [session, setSession] = useState<DashboardSession | null>(null);
+  const [checking, setChecking] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let active = true;
+    const expire = () => { clearSession(); setSession(null); setChecking(false); setError(""); };
+    window.addEventListener("dashboard-session-expired", expire);
+    dashboardAuth.session().then(value => { if (active) setSession(value); })
+      .catch(() => { if (active) setError("Unable to verify dashboard access. Please try again."); })
+      .finally(() => { if (active) setChecking(false); });
+    return () => { active = false; window.removeEventListener("dashboard-session-expired", expire); };
+  }, []);
+  useEffect(() => {
+    if (!session?.authenticated || !session.expires_at) return;
+    const timeout = window.setTimeout(() => { clearSession(); setSession(null); }, Math.max(0, Date.parse(session.expires_at) - Date.now()));
+    return () => window.clearTimeout(timeout);
+  }, [session]);
+  if (checking) return <div className="login-shell"><p role="status">Checking dashboard access…</p></div>;
+  if (!session?.authenticated) return <Login initialError={error} onLogin={setSession} />;
+  return <DashboardShell onLogout={async () => { await dashboardAuth.logout(); clearSession(); setSession(null); }} />;
 }

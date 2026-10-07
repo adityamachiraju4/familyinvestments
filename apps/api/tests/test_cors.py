@@ -10,6 +10,7 @@ def test_development_origin_preflight():
     assert response.status_code == 200
     assert response.headers['access-control-allow-origin'] == 'http://127.0.0.1:5173'
     assert response.headers['access-control-allow-credentials'] == 'true'
+    assert 'X-CSRF-Token' in response.headers['access-control-allow-headers']
 
 
 def test_unknown_origin_is_rejected():
@@ -42,6 +43,7 @@ def test_production_only_allows_explicit_frontend():
     assert response.status_code == 200
     assert response.headers['access-control-allow-origin'] == 'https://dashboard.example.com'
     assert response.headers['access-control-allow-credentials'] == 'true'
+    assert 'X-CSRF-Token' in response.headers['access-control-allow-headers']
     for origin in ('http://localhost:5173', 'http://127.0.0.1:5173', 'https://attacker.example'):
         response = preflight(client, origin)
         assert response.status_code == 400

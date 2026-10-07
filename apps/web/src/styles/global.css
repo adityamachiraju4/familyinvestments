@@ -806,3 +806,16 @@ footer {
     grid-column: auto;
   }
 }
+
+.login-shell { min-height: 100vh; display: grid; place-items: center; padding: 24px; }
+.login-card { width: min(100%, 440px); padding: 32px; background: var(--surface, #18201a); border: 1px solid #2c3830; border-radius: 20px; }
+.login-card h1 { font-size: clamp(26px, 5vw, 34px); }
+.login-card form { display: grid; gap: 12px; margin: 28px 0; }
+.login-card input { width: 100%; min-width: 0; padding: 13px; border-radius: 8px; border: 1px solid #49584d; background: #111713; color: #e7eee9; font: inherit; }
+.login-card input:focus-visible { outline: 2px solid #a6cbb6; outline-offset: 2px; }
+.login-card button { margin-top: 10px; justify-content: center; }
+@media (max-width: 600px) {
+  header { height: auto; min-height: 90px; padding-block: 14px; }
+  .header-actions { flex-wrap: wrap; gap: 12px; }
+  .header-actions .connection { flex: 1; min-width: 150px; }
+}

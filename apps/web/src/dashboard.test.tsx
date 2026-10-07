@@ -22,7 +22,9 @@ const summary = {
 function mockApi(connected = true, stale = false) {
   return vi.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
     const path = String(input);
-    const data = path.endsWith("/summary")
+    const data = path.endsWith("/auth/session")
+      ? { authenticated: true, csrf_token: "test-csrf", expires_at: null }
+      : path.endsWith("/summary")
       ? summary
       : path.endsWith("/status")
         ? {
@@ -153,7 +155,7 @@ it("refresh button refetches after completing mutations", async () => {
 it("stops refresh before snapshot when sync fails", async () => {
   const fetch = vi
     .spyOn(globalThis, "fetch")
-    .mockResolvedValue(new Response("private provider error", { status: 401 }));
+    .mockResolvedValue(new Response(JSON.stringify({ error: "credentials_invalid" }), { status: 401 }));
   await expect(refreshPortfolio()).rejects.toThrow(
     "Zerodha connection expired",
   );

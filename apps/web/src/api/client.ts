@@ -1,3 +1,4 @@
+import { csrfHeaders, clearSession } from "./auth";
 import type {
   Summary,
   Snapshot,
@@ -22,21 +23,24 @@ export async function request<T>(
       method,
       signal: AbortSignal.timeout(timeout),
       credentials: "include",
-      headers: { Accept: "application/json" },
+      headers: { Accept: "application/json", ...csrfHeaders() },
     });
-    if (response.status === 401)
-      window.dispatchEvent(new Event("zerodha-session-expired"));
-    if (!response.ok)
-      throw new Error(
-        response.status === 401
-          ? "Zerodha connection expired"
-          : "Unable to load portfolio data. Please try again.",
-      );
+    if (response.status === 401) {
+      const body = await response.json().catch(() => ({}));
+      if (body.error === "credentials_invalid") {
+        window.dispatchEvent(new Event("zerodha-session-expired"));
+        throw new Error("Zerodha connection expired");
+      }
+      clearSession();
+      window.dispatchEvent(new Event("dashboard-session-expired"));
+      throw new Error("Dashboard login required");
+    }
+    if (!response.ok) throw new Error("Unable to load portfolio data. Please try again.");
     return (await response.json()) as T;
   } catch (error) {
     if (
       error instanceof Error &&
-      error.message.startsWith("Zerodha connection expired")
+      (error.message.startsWith("Zerodha connection expired") || error.message === "Dashboard login required")
     )
       throw error;
     throw new Error("Unable to load portfolio data. Please try again.");
