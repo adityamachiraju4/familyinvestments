@@ -12,17 +12,19 @@ from app.portfolio.routes import router as portfolio_router
 from app.integrations.zerodha.exceptions import IntegrationError
 from app.integrations.zerodha.routes import router as zerodha_router
 
-app = FastAPI(title=settings.APP_NAME, version="0.1.0", debug=settings.DEBUG)
+app = FastAPI(title=settings.APP_NAME, version="0.1.0", debug=settings.DEBUG if settings.APP_ENV == "development" else False)
 
-if settings.APP_ENV == "development":
-    app.add_middleware(
+def configure_cors(application: FastAPI, configuration) -> None:
+    application.add_middleware(
         CORSMiddleware,
-        allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+        allow_origins=configuration.cors_origins(),
         allow_credentials=True,
         allow_methods=["GET", "POST"],
         allow_headers=["Accept", "Content-Type"],
     )
 
+
+configure_cors(app, settings)
 
 @app.get("/health")
 def health() -> dict[str, str]:

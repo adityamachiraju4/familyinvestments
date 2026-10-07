@@ -235,3 +235,80 @@ reporting. Canonical refresh corrects only the derived bucket on repeated fills;
 immutable execution facts/identity and prior snapshots remain unchanged.
 Downgrade refuses loss of nonzero unclassified snapshot allocation or any
 UNCLASSIFIED bucket rather than silently changing it into Other.
+
+## Railway deployment preparation
+
+Deployment is not performed by these changes. Configure one backend service with
+Root Directory `/apps/api` and explicitly select Config File Path
+`/apps/api/railway.toml` (the config path is relative to the repository, not the
+service root). Railpack detects `requirements.txt`; the equivalent install
+command in that working directory is `python -m pip install -r requirements.txt`.
+Use Python 3.12, the locally validated backend version.
+
+The config starts a single process with:
+
+```sh
+sh -c 'exec uvicorn app.main:app --host 0.0.0.0 --port "$PORT" --proxy-headers'
+```
+
+Railway supplies `PORT`. There is no reload mode or hard-coded port. The
+pre-deploy command is `alembic upgrade head`, run once per deployment before the
+new app starts; a failure blocks the deployment. No request or application
+startup executes migrations. Review migration SQL and take a database backup
+before release; use one migration runner and avoid concurrent releases. Existing
+revisions 0001–0004 are unchanged. Current revision ID is `0004_classification`
+(file `0004_authoritative_classification.py`). Do not run downgrades automatically.
+
+Set these variables in Railway's backend service, never in frontend `VITE_`
+variables or source control:
+
+- `APP_ENV=production`, `DEBUG=false` (debug responses are forced off outside development).
+- `DATABASE_URL`: reference the attached PostgreSQL service URL. `postgres://`,
+  `postgresql://` and `postgresql+psycopg://` use the installed psycopg driver.
+  URL credentials, query parameters and existing TLS options are preserved.
+  Use the provider's required TLS/certificate policy for the selected connection;
+  do not disable verification to work around failures.
+- `ZERODHA_API_KEY`, `ZERODHA_API_SECRET`, `TOKEN_ENCRYPTION_KEY`: existing backend
+  configuration. Preserve the encryption key if migrating encrypted token data.
+- `ZERODHA_REDIRECT_URL=https://<public-api-host>/integrations/zerodha/callback`:
+  register exactly this HTTPS URL in the Kite developer console.
+- `FRONTEND_ORIGIN=https://<frontend-host>`: exact origin, no trailing slash,
+  path, query, credentials or wildcard. Required outside development; missing or
+  invalid origins fail startup. Production allows only this origin. Development
+  additionally allows `http://localhost:5173` and `http://127.0.0.1:5173`.
+- `DASHBOARD_URL=https://<frontend-host>/`: required for the frontend's existing
+  post-login dashboard return; it is server controlled.
+- `FORWARDED_ALLOW_IPS`: Uvicorn's verified trusted ingress proxy IPs/CIDRs.
+  Confirm the deployment's proxy source addresses and header handling before
+  configuring trust. Do not blindly set `*`. Without correct trust the HTTPS
+  callback can fail its existing exact scheme/host validation. Preserve the
+  public Host header; do not add application proxy middleware or bypass callback
+  validation. Uvicorn reads this variable directly; its default trusts loopback only.
+- `APP_NAME` is optional; `PORT` is platform provided.
+
+Railway health check path is `/health` (existing HTTP 200 process contract).
+`/health/db` remains available for operational readiness: 200 reachable or
+unconfigured, 503 configured but unreachable, with sanitized details. A process
+health check alone does not prove that database credentials are configured;
+verify `/health/db` after configuration.
+
+Manual steps before public access: provision/reference PostgreSQL, verify backup
+and migration results, configure secrets/domains/proxy trust, and register the
+Kite callback. Zerodha authentication still requires a manual browser login when
+the access token expires; no password/PIN/TOTP automation is provided. Use API and
+frontend custom domains on the same site to preserve the existing SameSite=Lax
+login-state cookie; unrelated domains can block the frontend's credentialed login
+request. Check the callback in a real browser after eventual deployment.
+
+The backend currently has no dashboard authentication. CORS is a browser origin
+policy, not API access control: add an authenticated access boundary before making
+financial endpoints publicly accessible. Keep production access gated until then.
+Railway/proxy log retention must also exclude callback query strings; application
+Uvicorn access logging already strips them. No settings/credentials are logged;
+SQLAlchemy hides bound parameters and production debug tracebacks are disabled.
+Investment endpoints remain brokerage read-only.
+
+References: [Railway config](https://docs.railway.com/config-as-code/reference),
+[monorepo roots](https://docs.railway.com/deployments/monorepo),
+[pre-deploy migrations](https://docs.railway.com/deployments/pre-deploy-command),
+[Uvicorn proxy trust](https://www.uvicorn.org/settings/).

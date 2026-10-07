@@ -471,3 +471,24 @@ def test_orders_and_trades_client_only_uses_get(monkeypatch):
     client = KiteClient(TOKEN)
     assert client.get_orders() == [] and client.get_trades() == []
     assert calls == [('GET','/orders'),('GET','/trades')]
+
+
+def test_production_callback_uses_configured_https_origin(db, monkeypatch):
+    monkeypatch.setattr(settings, 'APP_ENV', 'production')
+    monkeypatch.setattr(settings, 'ZERODHA_REDIRECT_URL', 'https://api.example.com/integrations/zerodha/callback')
+    connected = MagicMock()
+    monkeypatch.setattr(service, 'connect', connected)
+    async def run():
+        app.dependency_overrides[integration_db] = lambda: db
+        try:
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='https://api.example.com') as client:
+                response = await client.get('/integrations/zerodha/login')
+                assert 'Secure' in response.headers['set-cookie']
+                params = parse_qs(urlsplit(response.json()['login_url']).query)
+                state = parse_qs(params['redirect_params'][0])['state'][0]
+                response = await client.get('/integrations/zerodha/callback', params={'request_token':'testrequesttoken','state':state})
+                assert response.status_code == 200
+        finally:
+            app.dependency_overrides.clear()
+    asyncio.run(run())
+    connected.assert_called_once_with(db, 'testrequesttoken')

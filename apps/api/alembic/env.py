@@ -15,10 +15,10 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
-def database_url() -> str:
+def database_url():
     if not settings.DATABASE_URL:
         raise RuntimeError("DATABASE_URL must be configured to run Alembic migrations")
-    return settings.DATABASE_URL
+    return settings.database_url()
 
 
 def run_migrations_offline() -> None:
@@ -32,7 +32,7 @@ def run_migrations_offline() -> None:
 
 
 def run_migrations_online() -> None:
-    connectable = create_engine(database_url(), poolclass=pool.NullPool)
+    connectable = create_engine(database_url(), poolclass=pool.NullPool, hide_parameters=True, connect_args={"connect_timeout": 5})
     try:
         with connectable.connect() as connection:
             context.configure(connection=connection, target_metadata=target_metadata, compare_type=True)

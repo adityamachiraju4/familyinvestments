@@ -1,0 +1,5 @@
+# Service root: /apps/api. Config file path: /apps/api/railway.toml.
+[deploy]
+startCommand = "sh -c 'exec uvicorn app.main:app --host 0.0.0.0 --port \"$PORT\" --proxy-headers'"
+preDeployCommand = ["alembic upgrade head"]
+healthcheckPath = "/health"
