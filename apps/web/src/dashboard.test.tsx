@@ -399,3 +399,13 @@ it("intraday card labels reliable closed position and realised P&L", async () =>
   expect(await screen.findByText("Closed position")).toBeInTheDocument();
   expect(screen.getByText("Realised P&L ₹50.00")).toBeInTheDocument();
 });
+it("classified backend allocation has no needs-classification row or trading controls", async () => {
+  const { Allocation } = await import("./components/Plan");
+  render(<Allocation summary={{ ...summary, holdings_market_value: "1000", allocation: {
+    NIFTY_50: "0", LARGE_CAP: "600", MID_CAP: "200", SMALL_CAP: "200", OTHER: "0", UNCLASSIFIED: "0"
+  } }} />);
+  expect(screen.queryByText("Needs classification")).not.toBeInTheDocument();
+  expect(screen.queryByText(/Some holdings need classification/)).not.toBeInTheDocument();
+  expect(screen.getByText("₹600.00 · 60.00%")).toBeInTheDocument();
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});

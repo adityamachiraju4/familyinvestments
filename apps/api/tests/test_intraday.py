@@ -89,15 +89,15 @@ def test_invalid_position_data_rejected(db,provider,monkeypatch,change):
 
 
 def test_registry_changes_current_classification_without_financial_mutation(db,provider,monkeypatch):
-    provider.holdings=[dict(exchange='NSE',tradingsymbol='HDFCBANK',instrument_token=123,quantity=5,t1_quantity=0,average_price='100',last_price='110')]
+    provider.holdings=[dict(exchange='NSE',tradingsymbol='TEST_UNCLASSIFIED',instrument_token=123,quantity=5,t1_quantity=0,average_price='100',last_price='110')]
     activity.refresh_portfolio(db)
     holding=db.scalar(select(Holding));holding.bucket=Bucket.OTHER;db.commit()
     original=(holding.quantity,holding.average_price,holding.current_value,holding.bucket)
     assert call(db,'/portfolio/holdings').json()[0]['bucket']=='UNCLASSIFIED'
     values=call(db,'/portfolio/summary').json()
     assert Decimal(values['allocation']['UNCLASSIFIED'])==550
-    entry=buckets.InstrumentClassification('HDFCBANK',Bucket.LARGE_CAP,source='explicit_test_decision')
-    monkeypatch.setattr(buckets,'ALIASES',{**buckets.ALIASES,('NSE','HDFCBANK'):entry})
+    entry=buckets.InstrumentClassification('TEST_UNCLASSIFIED',Bucket.LARGE_CAP,source='explicit_test_decision')
+    monkeypatch.setattr(buckets,'ALIASES',{**buckets.ALIASES,('NSE','TEST_UNCLASSIFIED'):entry})
     assert call(db,'/portfolio/holdings').json()[0]['bucket']=='LARGE_CAP'
     values=call(db,'/portfolio/summary').json()
     assert Decimal(values['allocation']['LARGE_CAP'])==550
@@ -126,3 +126,43 @@ def test_net_only_mis_position_remains_visible(db,provider,monkeypatch):
     monkeypatch.setattr(provider,'get_positions',lambda:{'net':[POSITION],'day':[]},raising=False)
     row=intraday.today_intraday(db).positions[0]
     assert row.status=='OPEN' and row.open_quantity==2 and row.realised_pnl==30
+
+
+def test_legacy_classifications_flow_through_current_views_without_rewriting_history(db,provider,monkeypatch):
+    from datetime import timedelta
+    from app.models import HoldingSnapshot, PortfolioSnapshot
+    symbols=['ETERNAL','HDFCBANK','HINDUNILVR','HDFCLIFE','INFY','PNB','FEDERALBNK','NYKAA','KARURVYSYA','KWIL']
+    provider.holdings=[dict(exchange='NSE',tradingsymbol=symbol,instrument_token=index+1,
+        quantity=1,t1_quantity=0,average_price='80',last_price='100') for index,symbol in enumerate(symbols)]
+    provider.orders=[]
+    provider.trades=[{**TRADE,'tradingsymbol':'FEDERALBNK','quantity':1,'average_price':'80'}]
+    # Seed a preexisting historical snapshot using the prior registry configuration.
+    original_aliases=buckets.ALIASES
+    monkeypatch.setattr(buckets,'ALIASES',{})
+    old_day=DAY-timedelta(days=1)
+    provider.trades=[]
+    monkeypatch.setattr(service,'today',lambda:old_day)
+    activity.refresh_portfolio(db)
+    historical=[(row.id,row.bucket,row.market_value) for row in db.scalars(select(HoldingSnapshot))]
+    old_snapshot=db.scalar(select(PortfolioSnapshot))
+    original_values=(old_snapshot.unclassified_value,old_snapshot.other_value,old_snapshot.midcap_value)
+    monkeypatch.setattr(buckets,'ALIASES',original_aliases)
+    monkeypatch.setattr(service,'today',lambda:DAY)
+    # Current read fixes stale stored classifications immediately, without a sync.
+    holdings=call(db,'/portfolio/holdings').json()
+    assert all(row['bucket'] not in {'OTHER','UNCLASSIFIED'} for row in holdings)
+    provider.trades=[{**TRADE,'tradingsymbol':'FEDERALBNK','quantity':1,'average_price':'80'}]
+    activity.refresh_portfolio(db)
+    values=call(db,'/portfolio/summary').json()
+    assert Decimal(values['holdings_market_value'])==1000
+    assert {key:Decimal(value) for key,value in values['allocation'].items()}=={
+        'NIFTY_50':Decimal(0),'LARGE_CAP':Decimal(600),'MID_CAP':Decimal(200),
+        'SMALL_CAP':Decimal(200),'OTHER':Decimal(0),'UNCLASSIFIED':Decimal(0)}
+    assert sum(Decimal(value) for value in values['allocation'].values())==1000
+    assert activity.today_activity(db).executed[0].bucket==Bucket.MID_CAP
+    assert activity.contributions(db).allocation[Bucket.MID_CAP]==80
+    assert [(row.id,row.bucket,row.market_value) for row in db.scalars(select(HoldingSnapshot).where(HoldingSnapshot.snapshot_date==old_day))]==historical
+    db.refresh(old_snapshot)
+    assert (old_snapshot.unclassified_value,old_snapshot.other_value,old_snapshot.midcap_value)==original_values
+    current=db.scalars(select(HoldingSnapshot).where(HoldingSnapshot.snapshot_date==DAY)).all()
+    assert all(row.bucket not in {Bucket.OTHER,Bucket.UNCLASSIFIED} for row in current)

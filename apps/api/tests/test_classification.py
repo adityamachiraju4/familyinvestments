@@ -3,7 +3,7 @@ from app.models import Bucket
 from app.integrations.zerodha.buckets import classify_instrument, validate_registry, InstrumentClassification
 
 
-@pytest.mark.parametrize('symbol,bucket', [('NIFTYBEES',Bucket.NIFTY_50),('MIDCAPETF',Bucket.MID_CAP),('HDFCSML250',Bucket.SMALL_CAP),('ETERNAL',Bucket.UNCLASSIFIED),('NEWNIFTYMIDSMALLETF',Bucket.UNCLASSIFIED)])
+@pytest.mark.parametrize('symbol,bucket', [('NIFTYBEES',Bucket.NIFTY_50),('MIDCAPETF',Bucket.MID_CAP),('HDFCSML250',Bucket.SMALL_CAP),('ETERNAL',Bucket.LARGE_CAP),('NEWNIFTYMIDSMALLETF',Bucket.UNCLASSIFIED)])
 def test_authoritative_classification(symbol,bucket):
     assert classify_instrument(symbol,'NSE') == bucket
 
@@ -30,3 +30,17 @@ def test_reviewed_token_requires_matching_metadata(monkeypatch):
     monkeypatch.setattr(registry,'TOKENS',tokens)
     assert classify_instrument('X','NSE',123)==Bucket.SMALL_CAP
     assert classify_instrument('RECYCLED','NSE',123)==Bucket.UNCLASSIFIED
+
+
+@pytest.mark.parametrize('symbol,bucket', [
+    ('ETERNAL', Bucket.LARGE_CAP), ('HDFCBANK', Bucket.LARGE_CAP),
+    ('HINDUNILVR', Bucket.LARGE_CAP), ('HDFCLIFE', Bucket.LARGE_CAP),
+    ('INFY', Bucket.LARGE_CAP), ('PNB', Bucket.LARGE_CAP),
+    ('FEDERALBNK', Bucket.MID_CAP), ('NYKAA', Bucket.MID_CAP),
+    ('KARURVYSYA', Bucket.SMALL_CAP), ('KWIL', Bucket.SMALL_CAP),
+])
+@pytest.mark.parametrize('exchange', ['NSE', 'BSE'])
+def test_deliberate_household_stock_classifications(symbol, bucket, exchange):
+    from app.integrations.zerodha.buckets import ALIASES
+    assert classify_instrument(symbol, exchange) == bucket
+    assert ALIASES[(exchange, symbol)].source == 'explicit_household_classification'

@@ -53,6 +53,7 @@ export function Allocation({
       {summary &&
         Object.entries(bucketLabels).map(([key, label]) => {
           const value = numeric(summary?.allocation[key as Bucket]);
+          if (key === "UNCLASSIFIED" && value === 0) return null;
           const share = total > 0 ? ((value || 0) / total) * 100 : 0;
           return (
             <div className="allocation-row" key={key}>

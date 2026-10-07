@@ -491,8 +491,10 @@ Add a reviewed `InstrumentClassification` with symbol, exchange, assigned bucket
 and meaningful `source` metadata. Optional tokens also require matching symbol
 and exchange. Conflicts fail validation. Explicit OTHER remains available for
 known outside-category assets; unknown identities become UNCLASSIFIED.
-The ten listed stocks now await deliberate classification; no market-cap category
-is inferred. ETF mappings NIFTYBEES/MIDCAPETF/HDFCSML250 remain unchanged.
+The ten legacy stocks use explicit household classifications: LARGE_CAP for
+ETERNAL, HDFCBANK, HINDUNILVR, HDFCLIFE, INFY and PNB; MID_CAP for FEDERALBNK
+and NYKAA; SMALL_CAP for KARURVYSYA and KWIL. These are deliberate assignments,
+not inferred market-cap data. Unknown identities still remain UNCLASSIFIED. ETF mappings NIFTYBEES/MIDCAPETF/HDFCSML250 remain unchanged.
 Current holdings responses and allocation rederive buckets from the registry, so
 legacy OTHER placeholders show “Needs classification” immediately. Normal future
 sync corrects stored derived classification. No backfill or historical snapshot

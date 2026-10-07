@@ -34,16 +34,17 @@ def validate_registry(entries):
     return aliases, tokens
 
 
-# These holdings have no reviewed bucket yet. Add an InstrumentClassification
-# below only after a deliberate household decision with source metadata.
-PENDING_CLASSIFICATION = ("ETERNAL", "FEDERALBNK", "HDFCBANK", "HINDUNILVR", "KWIL",
-                          "NYKAA", "HDFCLIFE", "INFY", "KARURVYSYA", "PNB")
-
+# Stock buckets below are deliberate household instructions, not inferred market-cap data.
 REGISTRY = (
     InstrumentClassification("NIFTYBEES", Bucket.NIFTY_50, display_name="Nifty 50 ETF"),
     InstrumentClassification("MIDCAPETF", Bucket.MID_CAP, display_name="Midcap ETF"),
     InstrumentClassification("HDFCSML250", Bucket.SMALL_CAP, display_name="HDFC Smallcap 250 ETF"),
-
+    *(InstrumentClassification(symbol, Bucket.LARGE_CAP, source="explicit_household_classification")
+      for symbol in ("ETERNAL", "HDFCBANK", "HINDUNILVR", "HDFCLIFE", "INFY", "PNB")),
+    *(InstrumentClassification(symbol, Bucket.MID_CAP, source="explicit_household_classification")
+      for symbol in ("FEDERALBNK", "NYKAA")),
+    *(InstrumentClassification(symbol, Bucket.SMALL_CAP, source="explicit_household_classification")
+      for symbol in ("KARURVYSYA", "KWIL")),
 )
 ALIASES, TOKENS = validate_registry(REGISTRY)  # Fail at import/startup on conflicts.
 

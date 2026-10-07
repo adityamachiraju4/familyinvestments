@@ -245,9 +245,9 @@ def test_month_validation(db, month):
     assert request(db, f'/portfolio/monthly-target?month={month}').status_code == 422
 
 
-def test_individual_equities_need_deliberate_classification():
+def test_individual_equities_have_deliberate_classification():
     for symbol in ('ETERNAL', 'FEDERALBNK', 'HDFCBANK', 'HINDUNILVR', 'KWIL', 'NYKAA', 'HDFCLIFE', 'INFY', 'KARURVYSYA', 'PNB'):
-        assert zerodha.classify_instrument(symbol, "NSE") == Bucket.UNCLASSIFIED
+        assert zerodha.classify_instrument(symbol, "NSE") in {Bucket.LARGE_CAP, Bucket.MID_CAP, Bucket.SMALL_CAP}
 
 
 def test_inactive_excluded_from_all_current_views_and_snapshots(db, monkeypatch):
