@@ -19,7 +19,7 @@ Open http://127.0.0.1:5173. Start the backend from `apps/api` with the repositor
 ../../.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
-Keep both services bound to loopback. Dashboard session authentication is required; configure backend household credentials before starting. The only client configuration is `VITE_API_BASE_URL`; never put provider secrets or backend configuration in a `VITE_` variable. Use the same `127.0.0.1` hostname for the frontend, API and configured Zerodha callback so browser-bound login cookies work consistently.
+Keep both services bound to loopback. Dashboard session authentication is required; configure backend household credentials before starting. Local API configuration is optional `VITE_API_BASE_URL` (default `http://127.0.0.1:8000`); never put provider secrets or backend configuration in a `VITE_` variable. Use the same `127.0.0.1` hostname for the frontend, API and configured Zerodha callback so browser-bound login cookies work consistently.
 
 ## Architecture
 
@@ -67,12 +67,29 @@ SESSION_TTL_SECONDS only in the backend. Generate hashes with
 `python -m scripts.hash_dashboard_password` from apps/api and follow the backend
 README. No credentials or session bearer tokens belong in frontend env variables,
 localStorage or source. The frontend keeps only the CSRF token in memory, sends
-it on protected requests and uses fetch credentials: include. Only
-VITE_API_BASE_URL points at the API.
+it on protected requests and uses fetch credentials: include. Development uses VITE_API_BASE_URL; production always uses /api.
 
-For production, configure explicit FRONTEND_ORIGIN, DASHBOARD_URL and the HTTPS
-Kite callback. Same-site custom Vercel/Railway domains are recommended because
-browsers may block cross-site cookies on the default provider domains. The API
-session cookie is host-only, Secure, HttpOnly, SameSite=None in production;
-local development uses the same loopback hostname with SameSite=Lax. No broad
-cookie domain, automatic brokerage login or client-side secret storage is used.
+For production, use Vercel Root Directory `apps/web`. `vercel.json` proxies
+`/api/:path*` to `https://familyinvestments-production.up.railway.app/:path*`,
+stripping the `/api` prefix without proxying static assets. Production always
+uses `/api`, including when a legacy VITE_API_BASE_URL is set. Remove that
+variable on the next separately authorized deployment. Never add backend secrets.
+
+Keep FRONTEND_ORIGIN and DASHBOARD_URL at `https://familyinvestments.vercel.app`.
+Keep Kite's registered callback and backend callback configuration at
+`https://familyinvestments-production.up.railway.app/integrations/zerodha/callback`.
+One-time callback state and the configured dashboard redirect are unchanged.
+
+The host-only cookie becomes first-party to the browser's Vercel origin through
+the proxy. Production retains Secure, HttpOnly, SameSite=None, Path=/, finite
+Max-Age and the __Host- prefix without Domain. Development retains SameSite=Lax.
+Session expiry, logout revocation, explicit origin checks and session-bound CSRF
+verification are unchanged. The proxy must forward Cookie, Origin and
+X-CSRF-Token and return Set-Cookie. Private responses already use no-store;
+CORS remains explicitly scoped and direct Railway health checks are unaffected.
+
+After a separately authorized deployment, verify mobile/in-app login, session,
+portfolio, refresh, reconnect and logout through `/api`. Check the dashboard
+cookie host, CSRF headers and rejected missing/invalid CSRF requests. Verify
+Railway health and the unchanged one-time Zerodha callback/dashboard redirect.
+Local tests cannot verify deployed Vercel cookie/header forwarding.

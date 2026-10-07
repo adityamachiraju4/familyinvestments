@@ -10,7 +10,7 @@ export function csrfHeaders(): Record<string, string> {
 }
 export function clearSession() { csrf = ""; }
 export function validateAuthTransport(pageProtocol: string, apiUrl: string) {
-  if (pageProtocol === "https:" && new URL(apiUrl).protocol !== "https:")
+  if (pageProtocol === "https:" && new URL(apiUrl, `${pageProtocol}//dashboard.invalid`).protocol !== "https:")
     throw new Error("Dashboard API must use HTTPS.");
 }
 async function authRequest(path: string, body?: unknown): Promise<DashboardSession> {
