@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.integrations.zerodha.exceptions import IntegrationError
 from app.integrations.zerodha.routes import integration_db
 from app.portfolio import service
+from app.portfolio.intraday import IntradayView
 from app.portfolio.activity_schemas import RefreshResult, ActivityView, ContributionsView
 from app.portfolio.schemas import HoldingHistoryView, MonthlyTargetView, PortfolioSummary, SnapshotView
 
@@ -67,3 +68,9 @@ def activity_today(db: Session = Depends(integration_db)):
 def contributions_month(db: Session = Depends(integration_db)):
     from app.portfolio.activity import contributions
     return contributions(db)
+
+
+@router.get("/intraday/today", response_model=IntradayView)
+def intraday_today(db: Session = Depends(integration_db)):
+    from app.portfolio.intraday import today_intraday
+    return today_intraday(db)

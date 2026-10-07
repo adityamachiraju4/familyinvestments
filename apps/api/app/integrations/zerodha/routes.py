@@ -153,4 +153,4 @@ def sync(db: Session = Depends(integration_db)) -> dict:
 def holdings(db: Session = Depends(integration_db)) -> list[HoldingView]:
     account = service.single_account(db)
     rows = db.scalars(select(Holding).where(Holding.account_id == account.id, Holding.is_active.is_(True)).order_by(Holding.exchange, Holding.tradingsymbol)).all()
-    return [HoldingView.model_validate(row) for row in rows]
+    return [HoldingView.model_validate(row).model_copy(update={"bucket": service.classify_instrument(row.tradingsymbol, row.exchange, row.instrument_token)}) for row in rows]

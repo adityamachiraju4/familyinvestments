@@ -44,10 +44,10 @@ export function Allocation({
     0,
   );
   return (
-    <Card title="Asset allocation">
+    <Card title="Portfolio allocation">
       <p className="muted">
         {summary
-          ? "Actual allocation · market value"
+          ? "Active settled holdings · authoritative buckets"
           : "Monthly target allocation"}
       </p>
       {summary &&
@@ -59,7 +59,7 @@ export function Allocation({
               <div>
                 <span>{label}</span>
                 <span>
-                  {value === null
+                  {money(value)} · {value === null
                     ? "—"
                     : total > 0
                       ? `${share.toFixed(2)}%`

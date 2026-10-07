@@ -1,6 +1,7 @@
 import { csrfHeaders, clearSession } from "./auth";
 import type {
   Summary,
+  Intraday,
   Snapshot,
   Target,
   Status,
@@ -47,6 +48,7 @@ export async function request<T>(
   }
 }
 export const api = {
+  intraday: () => request<Intraday>("/portfolio/intraday/today"),
   activity: () => request<Activity>("/portfolio/activity/today"),
   contributions: () => request<Contributions>("/portfolio/contributions/month"),
   summary: () => request<Summary>("/portfolio/summary"),

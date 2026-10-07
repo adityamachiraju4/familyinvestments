@@ -153,7 +153,10 @@ def test_daily_and_holding_snapshots_idempotent(db):
     assert child.id == child_id and child.market_value == Decimal('150')
 
 
-def test_snapshot_largecap_residual_conserves_allocation(db):
+def test_snapshot_largecap_residual_conserves_allocation(db, monkeypatch):
+    from app.integrations.zerodha import buckets
+    entry = buckets.InstrumentClassification('NIFTYBEES', Bucket.LARGE_CAP)
+    monkeypatch.setattr(buckets, 'ALIASES', {('NSE', 'NIFTYBEES'): entry})
     add_holding(db, bucket=Bucket.LARGE_CAP)
     snapshot = service.snapshot_today(db)
     assert snapshot.other_value == Decimal('120')
@@ -242,9 +245,9 @@ def test_month_validation(db, month):
     assert request(db, f'/portfolio/monthly-target?month={month}').status_code == 422
 
 
-def test_individual_equities_remain_other():
+def test_individual_equities_need_deliberate_classification():
     for symbol in ('ETERNAL', 'FEDERALBNK', 'HDFCBANK', 'HINDUNILVR', 'KWIL', 'NYKAA', 'HDFCLIFE', 'INFY', 'KARURVYSYA', 'PNB'):
-        assert zerodha.classify_instrument(symbol, "NSE") == Bucket.OTHER
+        assert zerodha.classify_instrument(symbol, "NSE") == Bucket.UNCLASSIFIED
 
 
 def test_inactive_excluded_from_all_current_views_and_snapshots(db, monkeypatch):
@@ -267,14 +270,14 @@ def test_inactive_excluded_from_all_current_views_and_snapshots(db, monkeypatch)
     assert Decimal(values['holdings_invested_value']) == Decimal('100')
     assert Decimal(values['holdings_market_value']) == Decimal('120')
     assert Decimal(values['total_pnl']) == Decimal('20')
-    assert Decimal(values['allocation']['OTHER']) == Decimal('120')
+    assert Decimal(values['allocation']['UNCLASSIFIED']) == Decimal('120')
     assert Decimal(values['allocation']['NIFTY_50']) == 0
     corrected = service.snapshot_today(db)
     assert corrected.id == incorrect_id
     assert corrected.holdings_invested_value == Decimal('100')
     assert corrected.holdings_market_value == Decimal('120')
     assert corrected.total_account_value == Decimal('5219.50')
-    assert corrected.nifty_value == 0 and corrected.other_value == Decimal('120')
+    assert corrected.nifty_value == 0 and corrected.unclassified_value == Decimal('120')
     assert db.scalar(select(func.count()).select_from(PortfolioSnapshot)) == 2
     todays_children = db.scalars(select(HoldingSnapshot).where(HoldingSnapshot.snapshot_date == DAY)).all()
     assert [r.tradingsymbol for r in todays_children] == ['CURRENT']

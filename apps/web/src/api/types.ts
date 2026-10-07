@@ -115,3 +115,18 @@ export interface RefreshResult {
   orders_synced: number;
   trades_synced: number;
 }
+
+export interface Intraday {
+  date: string;
+  observed_at: string | null;
+  positions_available: boolean;
+  positions: {
+    symbol: string; exchange: string; product: "MIS"; activity_type: "INTRADAY";
+    buy_quantity: number; sell_quantity: number; open_quantity: number | null;
+    average_buy_price: Decimal | null; average_sell_price: Decimal | null;
+    buy_value: Decimal; sell_value: Decimal;
+    realised_pnl: Decimal | null; unrealised_pnl: Decimal | null;
+    status: "OPEN" | "CLOSED" | "UNCONFIRMED";
+    source: "provider_positions" | "recorded_fills"; fill_count: number;
+  }[];
+}

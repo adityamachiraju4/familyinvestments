@@ -4,6 +4,7 @@ import { useQuery } from "../hooks/useQuery";
 import { Card, Metric, State } from "../components/UI";
 import { Chart } from "../components/Chart";
 import { Allocation, Plan } from "../components/Plan";
+import { IntradayCard } from "../components/IntradayCard";
 import { ActivityCard } from "../components/ActivityCard";
 import { money, percent } from "../utils/format";
 export default function Overview({
@@ -115,12 +116,13 @@ export default function Overview({
           />
         )}
       </Card>
+      <IntradayCard revision={revision} enabled={canFetchSummary} />
       <ActivityCard revision={revision} />
       <div className="two-column">
         {canFetchSummary && summary.data ? (
           <Allocation summary={summary.data} target={target.data} />
         ) : (
-          <Card title="Asset allocation">
+          <Card title="Portfolio allocation">
             <State loading={summary.loading} error={summary.error} />
           </Card>
         )}

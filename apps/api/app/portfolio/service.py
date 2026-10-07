@@ -31,7 +31,7 @@ def calculate_summary(rows: list[Holding], available_cash: Decimal, last_sync_at
     percent = pnl / invested * 100 if invested > 0 else Decimal(0)
     allocation = {bucket: Decimal(0) for bucket in Bucket}
     for row in rows:
-        allocation[Bucket(row.bucket)] += row.current_value
+        allocation[zerodha.classify_instrument(row.tradingsymbol, row.exchange, row.instrument_token)] += row.current_value
     return PortfolioSummary(
         holdings_invested_value=invested, holdings_market_value=market,
         available_cash=available_cash, total_account_value=market + available_cash,
@@ -93,7 +93,7 @@ def snapshot_today(db: Session, *, current_funds: Funds | None = None, commit: b
             item = {
                 "account_id": account.id, "snapshot_date": day,
                 "exchange": row.exchange, "tradingsymbol": row.tradingsymbol,
-                "bucket": row.bucket, "quantity": row.quantity,
+                "bucket": zerodha.classify_instrument(row.tradingsymbol, row.exchange, row.instrument_token), "quantity": row.quantity,
                 "average_price": row.average_price, "last_price": row.last_price,
                 "invested_value": row.invested_value, "market_value": row.current_value,
                 "pnl": row.unrealised_pnl, "pnl_percent": row.unrealised_pnl_percent,

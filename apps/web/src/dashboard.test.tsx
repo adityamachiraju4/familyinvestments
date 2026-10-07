@@ -361,3 +361,41 @@ it("handles failure callback with safe reconnect message and removes marker", as
   expect(await screen.findByRole("button", { name: "Connect Zerodha for today" })).toBeInTheDocument();
   expect(fetch.mock.calls.filter(([url]) => String(url).includes("/portfolio/refresh"))).toHaveLength(0);
 });
+
+it("shows separate intraday positions and unavailable P&L without trading controls", async () => {
+  const { IntradayCard } = await import("./components/IntradayCard");
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+    date: "2026-10-07", observed_at: null, positions_available: false,
+    positions: [{ symbol: "NYKAA", exchange: "NSE", product: "MIS", activity_type: "INTRADAY",
+      buy_quantity: 5, sell_quantity: 3, open_quantity: 2, buy_value: "500", sell_value: "330",
+      realised_pnl: null, unrealised_pnl: null, status: "UNCONFIRMED", source: "recorded_fills", fill_count: 2 }]
+  })));
+  render(<IntradayCard revision={0} />);
+  expect(await screen.findByText("NYKAA")).toBeInTheDocument();
+  expect(screen.getByText("Intraday Today")).toBeInTheDocument();
+  expect(screen.getByText("Bought 5 · Sold 3")).toBeInTheDocument();
+  expect(screen.getByText("Position unconfirmed · Recorded net 2")).toBeInTheDocument();
+  expect(screen.getAllByText(/Realised P&L —/).length).toBeGreaterThan(0);
+  expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});
+it("portfolio allocation shows unclassified amount separately from target allocation", async () => {
+  const { Allocation } = await import("./components/Plan");
+  render(<Allocation summary={{ ...summary, allocation: { NIFTY_50: "0", MID_CAP: "0", SMALL_CAP: "0", LARGE_CAP: "0", OTHER: "0", UNCLASSIFIED: "8897.41" } }}
+    target={{ month: "2026-10-01", total_target: "15000", nifty_target: "8000", midcap_target: "5000", smallcap_target: "2000" }} />);
+  expect(screen.getByText("Portfolio allocation")).toBeInTheDocument();
+  expect(screen.getByText("Needs classification")).toBeInTheDocument();
+  expect(screen.getByText("₹8,897.41 · 100.00%")).toBeInTheDocument();
+  expect(screen.getByText("Target allocation")).toBeInTheDocument();
+});
+it("intraday card labels reliable closed position and realised P&L", async () => {
+  const { IntradayCard } = await import("./components/IntradayCard");
+  vi.spyOn(globalThis, "fetch").mockResolvedValue(new Response(JSON.stringify({
+    date: "2026-10-07", observed_at: "2026-10-07T10:00:00Z", positions_available: true,
+    positions: [{ symbol: "NYKAA", exchange: "NSE", product: "MIS", buy_quantity: 5, sell_quantity: 5,
+      open_quantity: 0, buy_value: "500", sell_value: "550", realised_pnl: "50", unrealised_pnl: "0",
+      status: "CLOSED", source: "provider_positions", fill_count: 2 }]
+  })));
+  render(<IntradayCard revision={0} />);
+  expect(await screen.findByText("Closed position")).toBeInTheDocument();
+  expect(screen.getByText("Realised P&L ₹50.00")).toBeInTheDocument();
+});

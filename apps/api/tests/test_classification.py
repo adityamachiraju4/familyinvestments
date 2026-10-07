@@ -3,7 +3,7 @@ from app.models import Bucket
 from app.integrations.zerodha.buckets import classify_instrument, validate_registry, InstrumentClassification
 
 
-@pytest.mark.parametrize('symbol,bucket', [('NIFTYBEES',Bucket.NIFTY_50),('MIDCAPETF',Bucket.MID_CAP),('HDFCSML250',Bucket.SMALL_CAP),('ETERNAL',Bucket.OTHER),('NEWNIFTYMIDSMALLETF',Bucket.UNCLASSIFIED)])
+@pytest.mark.parametrize('symbol,bucket', [('NIFTYBEES',Bucket.NIFTY_50),('MIDCAPETF',Bucket.MID_CAP),('HDFCSML250',Bucket.SMALL_CAP),('ETERNAL',Bucket.UNCLASSIFIED),('NEWNIFTYMIDSMALLETF',Bucket.UNCLASSIFIED)])
 def test_authoritative_classification(symbol,bucket):
     assert classify_instrument(symbol,'NSE') == bucket
 

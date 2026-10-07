@@ -461,3 +461,39 @@ No deployment or live brokerage authentication was performed by this change.
 Actual Railway proxy behavior and browser cookie policy require this final live
 check. If household cookies cannot be used for Vercel-to-Railway API fetches,
 use same-site custom domains; the callback fix cannot override browser policy.
+
+## Intraday visibility and deliberate classification
+
+`GET /portfolio/intraday/today` is household-authenticated and read-only. It reads
+Kite `GET /portfolio/positions` on each card load/refresh, selects MIS only, uses
+`day` for today's turnover and matching `net` for current quantity and provider
+`realised`/`unrealised` P&L. P&L is shown only with consistent day/net quantities
+and explicit zero overnight quantity. Missing values remain null, never inferred
+as zero. Values exclude charges; this is not a tax/accounting report.
+See [Kite positions documentation](https://kite.trade/docs/connect/v3/portfolio/#positions).
+
+Recorded MIS executions supply fill counts and fallback turnover when the provider
+is unavailable. Fallback net buy-minus-sell quantities are labelled unconfirmed;
+product conversion, incomplete capture or later executions can make them differ
+from current positions. No realised/unrealised P&L is calculated from those fills.
+Provider credential errors still require reconnect. The endpoint writes nothing,
+uses no new migration, and leaves canonical refresh/order/trade persistence intact.
+Positions and fills are observed separately; timestamps/fill counts may differ
+until canonical refresh completes. No polling or trading controls are introduced.
+
+Monthly contributions remain recorded **CNC BUY fills only**. MIS buys/sells,
+unfilled orders and delivery executions awaiting holdings never enter settled
+holdings allocation or invested capital. Allocation uses active provider holdings
+with settled `quantity`, separately from the monthly target plan.
+
+The single version-controlled registry is `app/integrations/zerodha/buckets.py`.
+Add a reviewed `InstrumentClassification` with symbol, exchange, assigned bucket
+and meaningful `source` metadata. Optional tokens also require matching symbol
+and exchange. Conflicts fail validation. Explicit OTHER remains available for
+known outside-category assets; unknown identities become UNCLASSIFIED.
+The ten listed stocks now await deliberate classification; no market-cap category
+is inferred. ETF mappings NIFTYBEES/MIDCAPETF/HDFCSML250 remain unchanged.
+Current holdings responses and allocation rederive buckets from the registry, so
+legacy OTHER placeholders show “Needs classification” immediately. Normal future
+sync corrects stored derived classification. No backfill or historical snapshot
+rewrite is performed, and no financial quantities/prices/IDs are changed.
