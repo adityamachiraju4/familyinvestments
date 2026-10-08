@@ -50,6 +50,7 @@ it("routes auth, portfolio mutations and reconnect through the proxy with creden
   for (const [, init] of fetch.mock.calls.slice(1))
     expect(init?.headers).toMatchObject({ "X-CSRF-Token": "session-csrf" });
   expect(fetch.mock.calls[5][1]?.method).toBe("POST");
+  expect(fetch.mock.calls[6][1]?.method).toBe("POST");
   expect(fetch.mock.calls[7][1]?.method).toBe("POST");
   expect(csrfHeaders()).toEqual({});
 });

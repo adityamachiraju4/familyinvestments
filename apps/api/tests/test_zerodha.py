@@ -274,7 +274,7 @@ def test_routes_have_no_order_mutations():
     paths = app.openapi()['paths']
     assert '/portfolio/holdings' in paths and '/portfolio/funds' in paths
     assert not any(path.startswith('/orders') for path in paths)
-    assert {(path, method) for path, methods in paths.items() for method in methods if method in {'post', 'put', 'patch', 'delete'}} == {('/auth/login', 'post'), ('/auth/logout', 'post'), ('/integrations/zerodha/sync/holdings', 'post'), ('/portfolio/snapshots/today', 'post'), ('/portfolio/refresh', 'post')}
+    assert {(path, method) for path, methods in paths.items() for method in methods if method in {'post', 'put', 'patch', 'delete'}} == {('/auth/login', 'post'), ('/auth/logout', 'post'), ('/integrations/zerodha/login', 'post'), ('/integrations/zerodha/sync/holdings', 'post'), ('/portfolio/snapshots/today', 'post'), ('/portfolio/refresh', 'post')}
 
 @pytest.mark.parametrize('status,payload,code', [
     (401, {'message': TOKEN}, 'credentials_invalid'),

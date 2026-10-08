@@ -75,8 +75,11 @@ export async function refreshPortfolio(ifStale = false) {
   return result;
 }
 export async function reconnect() {
+  // Same-origin GET fetches may omit Origin. State creation uses POST so the
+  // browser supplies Origin and the backend can keep its strict CSRF checks.
   const { login_url } = await request<{ login_url: string }>(
     "/integrations/zerodha/login?return_to_dashboard=true",
+    "POST",
   );
   const url = new URL(login_url);
   if (url.protocol !== "https:" || url.hostname !== "kite.zerodha.com")

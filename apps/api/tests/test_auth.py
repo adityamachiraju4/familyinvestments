@@ -225,3 +225,89 @@ def test_logout_revokes_unused_brokerage_state(auth,monkeypatch):
     response=client.get('/integrations/zerodha/callback?request_token=testrequest&state='+raw,follow_redirects=False)
     assert response.status_code==303 and response.headers['location'].endswith('?zerodha=connect_failed')
     connected.assert_not_called()
+
+
+PRODUCTION_ORIGIN = 'https://familyinvestments.vercel.app'
+RAILWAY_ORIGIN = 'https://familyinvestments-production.up.railway.app'
+
+
+@pytest.fixture
+def proxied_auth(auth, monkeypatch):
+    import httpx
+    client, db = auth
+    for key, value in dict(
+        APP_ENV='production', FRONTEND_ORIGIN=PRODUCTION_ORIGIN,
+        DASHBOARD_URL=PRODUCTION_ORIGIN + '/',
+        ZERODHA_API_KEY='testapikey', ZERODHA_API_SECRET=SecretStr('testsecret'),
+        ZERODHA_REDIRECT_URL=RAILWAY_ORIGIN + '/integrations/zerodha/callback',
+        TOKEN_ENCRYPTION_KEY=SecretStr(Fernet.generate_key().decode()),
+    ).items():
+        monkeypatch.setattr(settings, key, value)
+    # Vercel strips /api; the ASGI application sees the Railway destination.
+    client.base_url = httpx.URL(RAILWAY_ORIGIN)
+    response = client.post('/auth/login', json={'username': 'household', 'password': PASSWORD},
+                           headers={'Origin': PRODUCTION_ORIGIN})
+    assert response.status_code == 200
+    assert client.get('/auth/session').json()['csrf_token'] == response.json()['csrf_token']
+    return client, db, response.json()['csrf_token']
+
+
+@pytest.mark.parametrize('origin', [
+    'https://evil.example', 'http://familyinvestments.vercel.app',
+    'https://familyinvestments.vercel.app.evil.example',
+    'https://sub.familyinvestments.vercel.app',
+    PRODUCTION_ORIGIN + '/', PRODUCTION_ORIGIN + ':444', 'null', None,
+])
+@pytest.mark.parametrize('method,path', [
+    ('POST', '/auth/login'), ('POST', '/auth/logout'),
+    ('GET', '/integrations/zerodha/login'), ('POST', '/integrations/zerodha/login'),
+])
+def test_proxy_origin_rejections(proxied_auth, origin, method, path):
+    from app.models import ZerodhaLoginState
+    client, db, csrf = proxied_auth
+    headers = {
+        'X-CSRF-Token': csrf, 'Referer': PRODUCTION_ORIGIN + '/',
+        'X-Forwarded-Host': 'familyinvestments.vercel.app', 'X-Forwarded-Proto': 'https',
+    }
+    if origin is not None:
+        headers['Origin'] = origin
+    kwargs = {'json': {'username': 'household', 'password': PASSWORD}} if path == '/auth/login' else {}
+    result = client.request(method, path, headers=headers, **kwargs)
+    assert result.status_code == 403
+    assert result.json()['detail'] == 'Request origin is not allowed'
+    assert db.scalar(select(func.count()).select_from(ZerodhaLoginState)) == 0
+    assert client.get('/auth/session').json()['authenticated']
+
+
+@pytest.mark.parametrize('method', ['GET', 'POST'])
+def test_proxied_zerodha_state_callback_and_logout(proxied_auth, monkeypatch, method):
+    import hashlib
+    from urllib.parse import parse_qs, urlsplit
+    from app.models import ZerodhaLoginState
+    client, db, csrf = proxied_auth
+    headers = {'Origin': PRODUCTION_ORIGIN, 'X-CSRF-Token': csrf,
+               'X-Forwarded-Host': 'evil.example', 'X-Forwarded-Proto': 'http'}
+    # Neither a missing nor incorrect CSRF token can create state, even with a trusted origin.
+    for token in ('', 'incorrect'):
+        assert client.request(method, '/integrations/zerodha/login',
+                              headers={**headers, 'X-CSRF-Token': token}).status_code == 403
+    response = client.request(method, '/integrations/zerodha/login', headers=headers)
+    assert response.status_code == 200
+    raw = parse_qs(parse_qs(urlsplit(response.json()['login_url']).query)['redirect_params'][0])['state'][0]
+    state = db.scalar(select(ZerodhaLoginState))
+    assert state.state_hash == hashlib.sha256(raw.encode()).hexdigest()
+    assert state.dashboard_session_id == db.scalar(select(DashboardSession)).id
+    assert state.account_id is not None and state.consumed_at is None
+    connected = MagicMock()
+    monkeypatch.setattr(zerodha, 'connect', connected)
+    callback = '/integrations/zerodha/callback?request_token=testrequest&state=' + raw
+    assert client.get(callback + 'x', follow_redirects=False).headers['location'] == PRODUCTION_ORIGIN + '/?zerodha=connect_failed'
+    assert client.get(callback, follow_redirects=False).headers['location'] == PRODUCTION_ORIGIN + '/?zerodha=connected'
+    db.refresh(state)
+    assert state.consumed_at is not None
+    assert client.get(callback, follow_redirects=False).headers['location'] == PRODUCTION_ORIGIN + '/?zerodha=connect_failed'
+    connected.assert_called_once()
+    for token in ('', 'incorrect'):
+        assert client.post('/auth/logout', headers={**headers, 'X-CSRF-Token': token}).status_code == 403
+    assert client.post('/auth/logout', headers=headers).status_code == 200
+    assert client.get('/auth/session').json()['authenticated'] is False

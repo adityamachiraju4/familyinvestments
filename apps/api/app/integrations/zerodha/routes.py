@@ -66,6 +66,7 @@ def dashboard_url() -> str:
 
 
 @router.get("/integrations/zerodha/login")
+@router.post("/integrations/zerodha/login")
 def login(response: Response, return_to_dashboard: bool = False, session=Depends(require_access), db: Session = Depends(integration_db)) -> dict[str, str]:
     require_config()
     dashboard_url()  # Validate server-only destination before creating a correlation.
