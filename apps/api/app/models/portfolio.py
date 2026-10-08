@@ -31,6 +31,11 @@ class Holding(Base):
     synced_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default=true(), nullable=False)
 
+    @property
+    def effective_quantity(self) -> int:
+        """Owned delivery units, including receivable T1 units; preserve raw fields."""
+        return self.quantity + self.t1_quantity
+
 
 class PortfolioSnapshot(CreatedAt, Base):
     __tablename__ = "portfolio_snapshots"

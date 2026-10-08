@@ -74,7 +74,7 @@ export default function Portfolio({ revision }: { revision: number }) {
                     </td>
                     <td data-label="Exchange">{h.exchange}</td>
                     <td data-label="Bucket">{bucketLabels[h.bucket]}</td>
-                    <td data-label="Quantity">{quantity(h.quantity)}</td>
+                    <td data-label="Quantity">{quantity(h.effective_quantity ?? h.quantity + (h.t1_quantity ?? 0))}</td>
                     <td data-label="Average price">{money(h.average_price)}</td>
                     <td data-label="Last price">{money(h.last_price)}</td>
                     <td data-label="Invested value">

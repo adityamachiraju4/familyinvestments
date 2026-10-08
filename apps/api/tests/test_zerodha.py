@@ -164,7 +164,7 @@ def test_bucket_mapping(symbol, bucket):
 
 def test_decimal_normalization_and_zero_cost():
     values = service.normalize_holding(RAW, 22, NOW)
-    for key, expected in {'invested_value': '0.3000', 'current_value': '0.9000', 'unrealised_pnl': '0.6000', 'unrealised_pnl_percent': '200.000000'}.items():
+    for key, expected in {'invested_value': '0.4000', 'current_value': '1.2000', 'unrealised_pnl': '0.8000', 'unrealised_pnl_percent': '200.000000'}.items():
         assert values[key] == Decimal(expected)
     assert values['bucket'] == Bucket.NIFTY_50 and values['account_id'] == 22 and values['t1_quantity'] == 1
     assert service.normalize_holding({**RAW, 'average_price': 0}, 22, NOW)['unrealised_pnl_percent'] == 0
@@ -190,7 +190,7 @@ def test_holdings_upsert_preserves_absent_rows(db, monkeypatch):
     response = api_call('/portfolio/holdings', db=db)
     assert response.status_code == 200
     row = response.json()[0]
-    assert row['quantity'] == 4 and row['bucket'] == 'NIFTY_50' and row['invested_value'] == '0.4000'
+    assert row['quantity'] == 4 and row['bucket'] == 'NIFTY_50' and row['invested_value'] == '0.5000'
     assert 'account_id' not in row and 'access_token' not in response.text
     monkeypatch.setattr(KiteClient, 'get_holdings', lambda self: [])
     assert service.sync_holdings(db) == 0

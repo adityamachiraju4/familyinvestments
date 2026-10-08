@@ -21,6 +21,10 @@ class ProviderHolding(BaseModel):
     average_price: Decimal = Field(ge=0, allow_inf_nan=False, max_digits=20, decimal_places=8)
     last_price: Decimal = Field(ge=0, allow_inf_nan=False, max_digits=20, decimal_places=8)
 
+    @property
+    def effective_quantity(self) -> int:
+        return self.quantity + self.t1_quantity
+
 
 class Funds(BaseModel):
     available_cash: Decimal = Field(allow_inf_nan=False)
@@ -34,6 +38,8 @@ class HoldingView(BaseModel):
     tradingsymbol: str
     exchange: str
     quantity: int
+    t1_quantity: int
+    effective_quantity: int
     average_price: Decimal
     last_price: Decimal
     invested_value: Decimal

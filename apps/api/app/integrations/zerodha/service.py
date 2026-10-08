@@ -102,8 +102,8 @@ def funds(db: Session) -> Funds:
 def normalize_holding(payload: dict, account_id: int, synced_at: datetime) -> dict:
     try:
         holding = ProviderHolding.model_validate(payload)
-        invested = holding.quantity * holding.average_price
-        current = holding.quantity * holding.last_price
+        invested = holding.effective_quantity * holding.average_price
+        current = holding.effective_quantity * holding.last_price
         pnl = current - invested
         percent = pnl / invested * 100 if invested else Decimal(0)
         values = {

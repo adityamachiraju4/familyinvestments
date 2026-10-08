@@ -93,7 +93,7 @@ def snapshot_today(db: Session, *, current_funds: Funds | None = None, commit: b
             item = {
                 "account_id": account.id, "snapshot_date": day,
                 "exchange": row.exchange, "tradingsymbol": row.tradingsymbol,
-                "bucket": zerodha.classify_instrument(row.tradingsymbol, row.exchange, row.instrument_token), "quantity": row.quantity,
+                "bucket": zerodha.classify_instrument(row.tradingsymbol, row.exchange, row.instrument_token), "quantity": row.effective_quantity,
                 "average_price": row.average_price, "last_price": row.last_price,
                 "invested_value": row.invested_value, "market_value": row.current_value,
                 "pnl": row.unrealised_pnl, "pnl_percent": row.unrealised_pnl_percent,

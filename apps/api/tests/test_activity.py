@@ -303,3 +303,80 @@ def test_real_contribution_breakdown_and_classification_only_replay(db, provider
     assert result.allocation[Bucket.SMALL_CAP] == Decimal('540.36')
     assert result.allocation[Bucket.OTHER] == result.allocation[Bucket.UNCLASSIFIED] == 0
     assert sum(result.allocation.values()) == result.recorded_buy_amount == Decimal('1953.54')
+
+
+T1_PURCHASES = [
+    dict(exchange='NSE', tradingsymbol='HDFCSML250', instrument_token=101,
+         quantity=0, t1_quantity=3, average_price='180.12', last_price='180.12'),
+    dict(exchange='NSE', tradingsymbol='MIDCAPETF', instrument_token=102,
+         quantity=0, t1_quantity=40, average_price='22.40', last_price='22.40'),
+    dict(exchange='NSE', tradingsymbol='NIFTYBEES', instrument_token=103,
+         quantity=0, t1_quantity=2, average_price='258.59', last_price='258.59'),
+]
+
+
+@pytest.mark.parametrize('quantity,t1', [(0, 3), (3, 0), (3, 2)])
+def test_delivery_effective_quantity_decimal(quantity, t1):
+    row = zerodha.normalize_holding({**T1_PURCHASES[0], 'quantity': quantity,
+                                    't1_quantity': t1, 'last_price': '181.13'}, 42,
+                                   datetime.now(timezone.utc))
+    assert row['quantity'] == quantity and row['t1_quantity'] == t1
+    assert row['invested_value'] == Decimal('180.12') * (quantity + t1)
+    assert row['current_value'] == Decimal('181.13') * (quantity + t1)
+    assert isinstance(row['current_value'], Decimal)
+
+
+def test_t1_settlement_values_snapshots_and_contributions(db, provider, monkeypatch):
+    provider.holdings = T1_PURCHASES.copy()
+    provider.orders = []
+    provider.trades = [dict(TRADE, trade_id=f't1-{i}', order_id=f'purchase-{i}',
+                           tradingsymbol=h['tradingsymbol'], instrument_token=h['instrument_token'],
+                           quantity=h['t1_quantity'], average_price=h['average_price'])
+                       for i, h in enumerate(T1_PURCHASES)]
+    # Intraday fills never become delivery contributions or holdings.
+    provider.trades.append(dict(TRADE, trade_id='mis', order_id='mis', product='MIS'))
+    first = activity.refresh_portfolio(db)
+    assert first.summary.holdings_invested_value == Decimal('1953.54')
+    assert first.summary.holdings_market_value == Decimal('1953.54')
+    assert first.summary.holding_count == 3
+    assert first.summary.allocation['SMALL_CAP'] == Decimal('540.36')
+    assert first.summary.allocation['MID_CAP'] == Decimal('896.00')
+    assert first.summary.allocation['NIFTY_50'] == Decimal('517.18')
+    assert activity.contributions(db).recorded_buy_amount == Decimal('1953.54')
+    rows = portfolio.current_holdings(db, 42)
+    identities = {row.tradingsymbol: row.id for row in rows}
+    from app.integrations.zerodha.schemas import HoldingView
+    for row in rows:
+        view = HoldingView.model_validate(row)
+        assert view.quantity == 0 and view.effective_quantity == view.t1_quantity > 0
+        history = portfolio.holding_history(db, row.tradingsymbol, 10)
+        assert history[0].quantity == view.effective_quantity
+        assert history[0].market_value == row.current_value
+    snapshot = db.scalar(select(PortfolioSnapshot))
+    assert snapshot.holdings_invested_value == snapshot.holdings_market_value == Decimal('1953.54')
+    snapshot_id = snapshot.id
+    provider.holdings = [dict(h, quantity=h['t1_quantity'], t1_quantity=0) for h in T1_PURCHASES]
+    for _ in range(2):
+        settled = activity.refresh_portfolio(db)
+        assert settled.summary.holdings_invested_value == first.summary.holdings_invested_value
+        assert settled.summary.holdings_market_value == first.summary.holdings_market_value
+        assert settled.summary.holding_count == 3
+        assert activity.contributions(db).recorded_buy_amount == Decimal('1953.54')
+    assert {row.tradingsymbol: row.id for row in portfolio.current_holdings(db, 42)} == identities
+    assert count(db, InvestmentTransaction) == 4  # Three CNC fills and one MIS fill, each once.
+    assert count(db, HoldingSnapshot) == 3 and count(db, PortfolioSnapshot) == 1
+    assert db.scalar(select(PortfolioSnapshot)).id == snapshot_id
+    # A partial invalid list and a failed fetch cannot reconcile active rows away.
+    provider.holdings = [T1_PURCHASES[0], {'tradingsymbol': 'invalid'}]
+    with pytest.raises(IntegrationError):
+        activity.refresh_portfolio(db)
+    assert len(portfolio.current_holdings(db, 42)) == 3
+    with monkeypatch.context() as patch:
+        patch.setattr(provider, 'get_holdings', MagicMock(side_effect=provider_error()))
+        with pytest.raises(IntegrationError):
+            activity.refresh_portfolio(db)
+    assert len(portfolio.current_holdings(db, 42)) == 3
+    provider.holdings = T1_PURCHASES[:1]
+    activity.refresh_portfolio(db)
+    assert len(portfolio.current_holdings(db, 42)) == 1
+    assert count(db, Holding) == 3

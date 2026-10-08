@@ -40,6 +40,8 @@ export interface Holding {
   exchange: string;
   bucket: Bucket;
   quantity: number;
+  t1_quantity?: number;
+  effective_quantity?: number;
   average_price: Decimal;
   last_price: Decimal;
   invested_value: Decimal;

@@ -52,7 +52,7 @@ export default function HoldingDetail({ revision }: { revision: number }) {
           <Card>
             <div className="facts">
               <span>
-                Quantity <strong>{quantity(current.quantity)}</strong>
+                Quantity <strong>{quantity(current.effective_quantity ?? current.quantity + (current.t1_quantity ?? 0))}</strong>
               </span>
               <span>
                 Average price <strong>{money(current.average_price)}</strong>

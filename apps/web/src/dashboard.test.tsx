@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, Routes, Route } from "react-router-dom";
 import { money, percent, quantity, pnlClass } from "./utils/format";
 import { request, refreshPortfolio } from "./api/client";
 import Overview from "./pages/Overview";
 import Portfolio from "./pages/Portfolio";
+import HoldingDetail from "./pages/HoldingDetail";
 import App from "./App";
 import { ActivityCard } from "./components/ActivityCard";
 import { RecordedContributions } from "./components/RecordedContributions";
@@ -408,4 +409,28 @@ it("classified backend allocation has no needs-classification row or trading con
   expect(screen.queryByText(/Some holdings need classification/)).not.toBeInTheDocument();
   expect(screen.getByText("₹600.00 · 60.00%")).toBeInTheDocument();
   expect(screen.queryByRole("button")).not.toBeInTheDocument();
+});
+
+
+it.each(["portfolio", "detail"])("shows T1 delivery ownership in %s", async (page) => {
+  const holding = {
+    tradingsymbol: "HDFCSML250", exchange: "NSE", bucket: "SMALL_CAP",
+    quantity: 0, t1_quantity: 3, effective_quantity: 3,
+    average_price: "180.12", last_price: "181.13",
+    invested_value: "540.36", current_value: "543.39",
+    unrealised_pnl: "3.03", unrealised_pnl_percent: "0.560737", synced_at: null,
+  };
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (input) =>
+    new Response(JSON.stringify(String(input).includes("/history") ? [] : [holding])));
+  render(
+    <MemoryRouter initialEntries={[page === "detail" ? "/holding/HDFCSML250" : "/portfolio"]}>
+      <Routes>
+        <Route path="/portfolio" element={<Portfolio revision={0} />} />
+        <Route path="/holding/:symbol" element={<HoldingDetail revision={0} />} />
+      </Routes>
+    </MemoryRouter>,
+  );
+  expect(await screen.findByText("₹540.36")).toBeInTheDocument();
+  expect(screen.getByText("₹543.39")).toBeInTheDocument();
+  expect(screen.getByText("3", { selector: page === "detail" ? "strong" : "td" })).toBeInTheDocument();
 });
